@@ -139,19 +139,109 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, isChatLoading]);
 
+  const compressImageIfNeeded = async (imageFile: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const maxDimension = 1600;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > maxDimension || height > maxDimension) {
+            if (width > height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(e.target?.result as string);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+          // Compress quality
+          const base64 = canvas.toDataURL('image/jpeg', 0.82);
+          resolve(base64);
+        };
+        img.onerror = reject;
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(imageFile);
+    });
+  };
+
+  const extractClientSideText = async (fileToParse: File): Promise<string | null> => {
+    const fileName = fileToParse.name.toLowerCase();
+
+    // Plain text
+    if (fileName.endsWith('.txt') || fileToParse.type === 'text/plain') {
+      return await fileToParse.text();
+    }
+
+    // Try PDF text extraction in browser
+    if (fileName.endsWith('.pdf') || fileToParse.type === 'application/pdf') {
+      try {
+        const arrayBuffer = await fileToParse.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+        // Browser text extractor from binary stream: extract readable ASCII / UTF-8 chunks
+        const decoder = new TextDecoder('utf-8', { fatal: false });
+        const rawString = decoder.decode(bytes);
+        // Extract text streams inside PDF: matches between BT and ET or parens/brackets
+        const textMatches: string[] = [];
+        const streamRegex = /BT[\s\S]*?ET/g;
+        let match;
+        while ((match = streamRegex.exec(rawString)) !== null) {
+          // Extract text literals inside ( ... ) Tj or [ ... ] TJ
+          const literals = match[0].match(/\(([^()]*)\)/g);
+          if (literals) {
+            const block = literals.map(l => l.slice(1, -1)).join(' ');
+            if (block.trim()) textMatches.push(block);
+          }
+        }
+        if (textMatches.length > 5) {
+          return textMatches.join('\n');
+        }
+      } catch (err) {
+        console.warn('Browser PDF regex extraction fallback:', err);
+      }
+    }
+
+    return null;
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
-    if (selected && (
-      selected.type === 'application/pdf' ||
+    if (!selected) return;
+
+    // 10MB Limit Check
+    if (selected.size > 10 * 1024 * 1024) {
+      setIngestError('Ukuran file maksimal 10MB ya Sud!');
+      setFile(null);
+      e.target.value = '';
+      return;
+    }
+
+    setIngestError(null);
+    const validExtensions = ['.pdf', '.png', '.jpg', '.jpeg', '.txt', '.ppt', '.pptx'];
+    const nameLower = selected.name.toLowerCase();
+    const isValid = validExtensions.some(ext => nameLower.endsWith(ext)) ||
       selected.type.startsWith('image/') ||
-      selected.name.toLowerCase().endsWith('.ppt') ||
-      selected.name.toLowerCase().endsWith('.pptx') ||
-      selected.type === 'application/vnd.ms-powerpoint' ||
-      selected.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-    )) {
+      selected.type === 'application/pdf';
+
+    if (isValid) {
       setFile(selected);
     } else {
-      alert('Upload file PDF, PPTX, atau gambar.');
+      setIngestError('Format file tidak didukung. Upload PDF, PPTX, TXT, atau gambar.');
     }
   };
 
@@ -159,12 +249,51 @@ export default function Home() {
     if (!file) { alert('Pilih file terlebih dahulu.'); return; }
     setLoading(true);
     setIngestError(null);
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('target_level', targetLevel);
+
     try {
-      const res = await fetch('/api/ingest', { method: 'POST', body: formData });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      let res: Response;
+      const isImage = file.type.startsWith('image/') || /\.(png|jpe?g)$/i.test(file.name);
+
+      if (isImage) {
+        // Compress image client-side if needed
+        const base64Data = await compressImageIfNeeded(file);
+        const base64Clean = base64Data.split(',')[1] || base64Data;
+        const formData = new FormData();
+        const blob = await (await fetch(base64Data)).blob();
+        formData.append('file', blob, file.name);
+        formData.append('target_level', targetLevel);
+
+        res = await fetch('/api/ingest', { method: 'POST', body: formData });
+      } else {
+        // Text / PDF / PPTX extraction
+        const clientExtracted = await extractClientSideText(file);
+
+        if (clientExtracted && clientExtracted.trim().length > 100) {
+          // Send lightweight JSON payload (bypassing Vercel 4.5MB payload limit)
+          res = await fetch('/api/ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              textContent: clientExtracted,
+              fileName: file.name,
+              targetLevel: targetLevel,
+            }),
+          });
+        } else {
+          // Fallback to FormData (server-side parser handles officeparser / pdf-parse)
+          const formData = new FormData();
+          formData.append('file', file);
+          formData.append('target_level', targetLevel);
+
+          res = await fetch('/api/ingest', { method: 'POST', body: formData });
+        }
+      }
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`HTTP ${res.status}: ${errText}`);
+      }
+
       const data = await res.json();
       setPayload(data.payload);
       setFromCache(data.cached === true);
@@ -173,7 +302,6 @@ export default function Home() {
       setFlipped(false);
       setQuizAnswers({});
       setQuizSubmitted(false);
-      setFromCache(false);
     } catch (error) {
       console.error(error);
       setIngestError(error instanceof Error ? error.message : 'Gagal memproses dokumen.');
@@ -247,7 +375,7 @@ export default function Home() {
             />
             <div className="text-4xl mb-2">📄</div>
             <p className="font-bold text-black">Klik untuk pilih file</p>
-            <p className="text-sm text-gray-500 mt-1">PDF, PPTX, atau Gambar (PNG, JPG)</p>
+            <p className="text-sm text-gray-500 mt-1">PDF, PPTX, atau Gambar (Maksimal 10MB)</p>
           </label>
 
           {/* Selected file */}

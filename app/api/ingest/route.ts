@@ -174,27 +174,73 @@ async function extractPdfText(buffer: Buffer): Promise<string> {
 // ─── Route ────────────────────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
-    const formData    = await request.formData();
-    const file        = formData.get('file') as File | null;
-    const targetLevel = formData.get('target_level') as TargetLevel | null;
+    const contentType = request.headers.get('content-type') || '';
+    let documentText = '';
+    let targetLevel: TargetLevel = 'SMA_SMK';
+    let isImageData = false;
+    let imageBase64 = '';
+    let mimeType = '';
+    let fileHashInput = '';
+    let docTitle = 'Materi';
 
-    if (!file) {
-      return NextResponse.json({ error: 'File is required' }, { status: 400 });
+    if (contentType.includes('application/json')) {
+      const body = await request.json();
+      documentText = body.textContent || '';
+      targetLevel = body.targetLevel || body.target_level || 'SMA_SMK';
+      docTitle = body.fileName || 'Materi';
+      fileHashInput = documentText;
+
+      if (!documentText.trim()) {
+        return NextResponse.json({ error: 'Teks dokumen kosong atau gagal diekstrak.' }, { status: 400 });
+      }
+    } else {
+      const formData = await request.formData();
+      const file = formData.get('file') as File | null;
+      targetLevel = ((formData.get('targetLevel') || formData.get('target_level')) as TargetLevel) || 'SMA_SMK';
+
+      if (!file) {
+        return NextResponse.json({ error: 'File is required' }, { status: 400 });
+      }
+
+      docTitle = file.name;
+      const bytes = await file.arrayBuffer();
+      const buffer = Buffer.from(bytes);
+      const fileName = file.name.toLowerCase();
+      const isPpt = fileName.endsWith('.ppt') || fileName.endsWith('.pptx');
+      const isPdf = fileName.endsWith('.pdf') || file.type === 'application/pdf';
+      const isImage = file.type.startsWith('image/');
+
+      if (isImage) {
+        isImageData = true;
+        imageBase64 = buffer.toString('base64');
+        mimeType = file.type;
+        fileHashInput = imageBase64;
+      } else if (isPpt) {
+        documentText = await extractPptText(buffer);
+        fileHashInput = buffer.toString('binary');
+      } else if (isPdf) {
+        const text = await extractPdfText(buffer);
+        if (text.trim().length > 200) {
+          documentText = text;
+        } else {
+          // Scanned PDF fallback
+          isImageData = true;
+          imageBase64 = buffer.toString('base64');
+          mimeType = 'application/pdf';
+        }
+        fileHashInput = buffer.toString('binary');
+      } else {
+        documentText = buffer.toString('utf-8');
+        fileHashInput = documentText;
+      }
     }
-    if (!targetLevel || !['SD_SMP', 'SMA_SMK', 'MAHASISWA'].includes(targetLevel)) {
+
+    if (!['SD_SMP', 'SMA_SMK', 'MAHASISWA'].includes(targetLevel)) {
       return NextResponse.json({ error: 'Valid target_level required' }, { status: 400 });
     }
 
-    const bytes  = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
-
-    const fileName  = file.name.toLowerCase();
-    const isPpt     = fileName.endsWith('.ppt') || fileName.endsWith('.pptx');
-    const isPdf     = fileName.endsWith('.pdf') || file.type === 'application/pdf';
-    const isImage   = file.type.startsWith('image/');
-
-    // ── SHA-256 hash ───────────────────────────────────────────────────────────
-    const hash = createHash('sha256').update(buffer).update(targetLevel).digest('hex');
+    // ── SHA-256 hash for cache ────────────────────────────────────────────────
+    const hash = createHash('sha256').update(fileHashInput).update(targetLevel).digest('hex');
 
     // ── Cache lookup ───────────────────────────────────────────────────────────
     const { data: cached, error: dbError } = await supabase
@@ -214,74 +260,41 @@ export async function POST(request: NextRequest) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
-    const genAI     = new GoogleGenerativeAI(apiKey);
+    const genAI = new GoogleGenerativeAI(apiKey);
     const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
-    const model     = genAI.getGenerativeModel(
+    const model = genAI.getGenerativeModel(
       { model: modelName },
       { apiVersion: 'v1beta' },
     );
 
     const generationConfig = {
-      temperature:      0.4,
-      maxOutputTokens:  8192,
+      temperature: 0.4,
+      maxOutputTokens: 8192,
       responseMimeType: 'application/json' as const,
     };
 
     const systemPrompt = SYSTEM_PROMPT(TONE[targetLevel]);
     let result;
 
-    if (isPpt) {
-      // ── PPT/PPTX: extract slide text → plain text prompt ────────────────────
-      const text = await extractPptText(buffer);
-      if (!text.trim()) throw new Error('No text extracted from presentation file');
-
-      result = await model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${truncateText(text)}` }] }],
-        generationConfig,
-      });
-
-    } else if (isPdf) {
-      // ── PDF: try text extraction first (3× faster); fallback to base64 ───────
-      const text = await extractPdfText(buffer);
-
-      if (text.trim().length > 200) {
-        // Text-based PDF: send as plain text
-        result = await model.generateContent({
-          contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${truncateText(text)}` }] }],
-          generationConfig,
-        });
-      } else {
-        // Scanned/image PDF: fallback to base64 inlineData
-        result = await model.generateContent({
-          contents: [{
-            role: 'user',
-            parts: [
-              { text: systemPrompt },
-              { inlineData: { mimeType: 'application/pdf', data: buffer.toString('base64') } },
-            ],
-          }],
-          generationConfig,
-        });
-      }
-
-    } else if (isImage) {
-      // ── Image: base64 inlineData ────────────────────────────────────────────
+    if (isImageData) {
       result = await model.generateContent({
         contents: [{
           role: 'user',
           parts: [
             { text: systemPrompt },
-            { inlineData: { mimeType: file.type, data: buffer.toString('base64') } },
+            { inlineData: { mimeType, data: imageBase64 } },
           ],
         }],
         generationConfig,
       });
-
     } else {
-      // ── Unknown: treat as plain text ────────────────────────────────────────
-      const text = buffer.toString('utf-8');
+      if (!documentText.trim()) throw new Error('No text extracted from document');
+
       result = await model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${truncateText(text)}` }] }],
+        contents: [{
+          role: 'user',
+          parts: [{ text: `${systemPrompt}\n\nDocument content:\n${truncateText(documentText)}` }],
+        }],
         generationConfig,
       });
     }
