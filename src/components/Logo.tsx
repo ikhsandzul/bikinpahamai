@@ -1,4 +1,43 @@
 import React from 'react';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
+
+interface MathTextProps {
+  content: string;
+  className?: string;
+}
+
+export function MathText({ content, className = '' }: MathTextProps) {
+  if (!content) return null;
+
+  // Split content by LaTeX inline ($...$) or block ($$...$$) delimitations
+  const parts = content.split(/(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$)/g);
+
+  return (
+    <span className={className}>
+      {parts.map((part, index) => {
+        if (part.startsWith('$$') && part.endsWith('$$')) {
+          const math = part.slice(2, -2);
+          try {
+            const html = katex.renderToString(math, { displayMode: true, throwOnError: false });
+            return <span key={index} dangerouslySetInnerHTML={{ __html: html }} className="my-2 block overflow-x-auto" />;
+          } catch (e) {
+            return <code key={index}>{part}</code>;
+          }
+        } else if (part.startsWith('$') && part.endsWith('$')) {
+          const math = part.slice(1, -1);
+          try {
+            const html = katex.renderToString(math, { displayMode: false, throwOnError: false });
+            return <span key={index} dangerouslySetInnerHTML={{ __html: html }} className="inline-block px-0.5" />;
+          } catch (e) {
+            return <code key={index}>{part}</code>;
+          }
+        }
+        return <span key={index}>{part}</span>;
+      })}
+    </span>
+  );
+}
 
 export default function Logo() {
   return (
@@ -21,3 +60,5 @@ export default function Logo() {
     </div>
   );
 }
+
+

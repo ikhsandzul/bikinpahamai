@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { TargetLevel, BikinPahamPayload, SummaryTopic, FlashcardItem, QuizQuestion } from '@/types/payload';
-import Logo from '@/components/Logo';
+import Logo, { MathText } from '@/components/Logo';
 import { Upload, BookOpen, Layers, HelpCircle, CheckCircle, XCircle, Sparkles, X, Send, Bot, User } from 'lucide-react';
 
 type TabType = 'summary' | 'flashcards' | 'quiz' | 'tutor';
@@ -394,19 +394,19 @@ export default function Home() {
                         className="bg-white border-2 border-black rounded-2xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-all"
                       >
                         <div className={`${CARD_COLORS[idx % CARD_COLORS.length]} border-b-2 border-black px-5 py-3`}>
-                          <h4 className="font-black text-black">{topic.topic}</h4>
+                          <h4 className="font-black text-black"><MathText content={topic.topic} /></h4>
                         </div>
                         <div className="p-5">
                           <ul className="space-y-2 mb-4">
                             {topic.key_points.map((point, i) => (
                               <li key={i} className="flex items-start gap-2">
                                 <span className="mt-1 w-3 h-3 bg-black rounded-sm shrink-0" />
-                                <span className="text-gray-800 text-sm">{point}</span>
+                                <span className="text-gray-800 text-sm"><MathText content={point} /></span>
                               </li>
                             ))}
                           </ul>
                           <div className="bg-[#FAF8F5] border-2 border-black rounded-xl p-3 text-sm text-gray-700">
-                            {topic.explanation}
+                            <MathText content={topic.explanation} />
                           </div>
                         </div>
                       </div>
@@ -438,13 +438,13 @@ export default function Home() {
                             {/* Front */}
                             <div className="absolute inset-0 bg-white border-2 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col items-center justify-center p-8 [backface-visibility:hidden]">
                               <div className="text-4xl mb-4">❓</div>
-                              <p className="text-xl font-black text-black text-center">{card.front}</p>
+                              <div className="text-xl font-black text-black text-center"><MathText content={card.front} /></div>
                               <p className="text-xs font-bold text-gray-400 mt-6 uppercase tracking-widest">Klik untuk Membalik</p>
                             </div>
                             {/* Back */}
                             <div className="absolute inset-0 bg-[#86EFAC] border-2 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col items-center justify-center p-8 [backface-visibility:hidden] [transform:rotateY(180deg)]">
                               <div className="text-4xl mb-4">💡</div>
-                              <p className="text-xl font-black text-black text-center">{card.back}</p>
+                              <div className="text-xl font-black text-black text-center"><MathText content={card.back} /></div>
                               <p className="text-xs font-bold text-gray-600 mt-6 uppercase tracking-widest">Klik untuk Membalik</p>
                             </div>
                           </div>
@@ -495,17 +495,17 @@ export default function Home() {
                       return (
                         <div key={q.id} className="border-2 border-black rounded-2xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
                           <div className="bg-[#FAF8F5] border-b-2 border-black px-5 py-3">
-                            <h4 className="font-black text-black">{q.id}. {q.question}</h4>
+                            <h4 className="font-black text-black">{q.id}. <MathText content={q.question} /></h4>
                           </div>
                           <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3">
                             {q.options.map((opt, idx) => {
-                              let optStyle = 'bg-white hover:bg-[#FAF8F5] border-2 border-black';
+                              let optStyle = 'bg-white hover:bg-[#FAF8F5] border-2 border-black text-black';
                               if (quizSubmitted) {
-                                if (opt === q.correct_answer) optStyle = 'bg-[#86EFAC] border-2 border-black';
-                                else if (userAnswer === opt) optStyle = 'bg-[#FECDD3] border-2 border-black';
-                                else optStyle = 'bg-white border-2 border-gray-300 opacity-60';
+                                if (opt === q.correct_answer) optStyle = 'bg-[#86EFAC] border-2 border-black text-black';
+                                else if (userAnswer === opt) optStyle = 'bg-[#FECDD3] border-2 border-black text-black';
+                                else optStyle = 'bg-white border-2 border-black opacity-60 text-black';
                               } else if (userAnswer === opt) {
-                                optStyle = 'bg-[#7DD3FC] border-2 border-black';
+                                optStyle = 'bg-[#7DD3FC] border-2 border-black text-black';
                               }
                               return (
                                 <label
@@ -521,7 +521,7 @@ export default function Home() {
                                     disabled={quizSubmitted}
                                     className="h-4 w-4 accent-black"
                                   />
-                                  <span className="flex-1 font-medium text-sm">{opt}</span>
+                                  <span className="flex-1 text-black font-bold text-base"><MathText content={opt} /></span>
                                   {quizSubmitted && opt === q.correct_answer && <CheckCircle size={18} className="text-green-700 shrink-0" />}
                                   {quizSubmitted && userAnswer === opt && userAnswer !== q.correct_answer && <XCircle size={18} className="text-red-600 shrink-0" />}
                                 </label>
@@ -531,7 +531,7 @@ export default function Home() {
                           {quizSubmitted && (
                             <div className="mx-5 mb-5 bg-[#7DD3FC] border-2 border-black rounded-xl p-4">
                               <p className="font-black text-black text-sm mb-1">💬 Penjelasan:</p>
-                              <p className="text-sm text-gray-800">{q.explanation}</p>
+                              <div className="text-sm text-gray-900 font-medium"><MathText content={q.explanation} /></div>
                             </div>
                           )}
                         </div>
@@ -605,7 +605,7 @@ export default function Home() {
                             {/* Neo-Brutalist Bubble */}
                             <div className={`max-w-[75%] border-2 border-black rounded-xl p-4 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] text-black ${m.role === 'user' ? 'bg-[#FFE600]' : 'bg-white'}`}>
                               <p className="text-xs font-black text-gray-600 mb-1">{m.role === 'user' ? 'Kamu' : 'Tutor Socrates'}</p>
-                              <p className="text-sm whitespace-pre-wrap">{m.content}</p>
+                              <div className="text-sm whitespace-pre-wrap"><MathText content={m.content} /></div>
                             </div>
                           </div>
                         );
