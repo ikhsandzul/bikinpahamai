@@ -2,9 +2,17 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { TargetLevel, BikinPahamPayload, SummaryTopic, FlashcardItem, QuizQuestion } from '@/types/payload';
-import { Upload, BookOpen, Layers, HelpCircle, CheckCircle, XCircle, Sparkles } from 'lucide-react';
+import { Upload, BookOpen, Layers, HelpCircle, CheckCircle, XCircle, Sparkles, X, Send, Bot, User } from 'lucide-react';
 
 type TabType = 'summary' | 'flashcards' | 'quiz' | 'tutor';
+
+const LEVEL_CONFIG: Record<TargetLevel, { label: string; color: string; emoji: string }> = {
+  SD_SMP:    { label: 'SD / SMP',   color: 'bg-[#86EFAC]', emoji: '🎒' },
+  SMA_SMK:   { label: 'SMA / SMK',  color: 'bg-[#7DD3FC]', emoji: '📐' },
+  MAHASISWA: { label: 'Mahasiswa',  color: 'bg-[#C084FC]', emoji: '🎓' },
+};
+
+const CARD_COLORS = ['bg-[#C084FC]', 'bg-[#7DD3FC]', 'bg-[#86EFAC]', 'bg-[#FBCFE8]', 'bg-[#FFE600]'];
 
 export default function Home() {
   const [targetLevel, setTargetLevel] = useState<TargetLevel>('SMA_SMK');
@@ -12,7 +20,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [payload, setPayload] = useState<BikinPahamPayload | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('summary');
-  const [flippedCards, setFlippedCards] = useState<Record<number, boolean>>({});
+
+  // Flashcard state
+  const [currentCardIdx, setCurrentCardIdx] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+
+  // Quiz state
   const [quizAnswers, setQuizAnswers] = useState<Record<number, string>>({});
   const [quizSubmitted, setQuizSubmitted] = useState(false);
 
@@ -37,12 +50,14 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: [...messages, { role: 'user', content: userMessage }],
-          context: payload ? `Document: ${payload.document_meta.title}. Topics: ${payload.summary_module.map(s => s.topic).join(', ')}` : 'General learning',
+          context: payload
+            ? `Document: ${payload.document_meta.title}. Topics: ${payload.summary_module.map(s => s.topic).join(', ')}`
+            : 'General learning',
         }),
       });
 
       if (!response.ok) throw new Error('Chat API error');
-      
+
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let assistantMessage = '';
@@ -56,9 +71,9 @@ export default function Home() {
           const chunk = decoder.decode(value);
           assistantMessage += chunk;
           setMessages(prev => {
-            const newMessages = [...prev];
-            newMessages[newMessages.length - 1] = { role: 'assistant', content: assistantMessage };
-            return newMessages;
+            const next = [...prev];
+            next[next.length - 1] = { role: 'assistant', content: assistantMessage };
+            return next;
           });
         }
       }
@@ -70,7 +85,6 @@ export default function Home() {
     }
   };
 
-  // Scroll to bottom when messages update
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -80,206 +94,190 @@ export default function Home() {
     if (selected && (selected.type === 'application/pdf' || selected.type.startsWith('image/'))) {
       setFile(selected);
     } else {
-      alert('Please upload a PDF or image file.');
+      alert('Upload file PDF atau gambar.');
     }
   };
 
   const handleIngest = async () => {
-    if (!file) {
-      alert('Please select a file first.');
-      return;
-    }
-
+    if (!file) { alert('Pilih file terlebih dahulu.'); return; }
     setLoading(true);
     const formData = new FormData();
     formData.append('file', file);
     formData.append('target_level', targetLevel);
-
     try {
-      const res = await fetch('/api/ingest', {
-        method: 'POST',
-        body: formData,
-      });
+      const res = await fetch('/api/ingest', { method: 'POST', body: formData });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       const data = await res.json();
       setPayload(data);
       setActiveTab('summary');
+      setCurrentCardIdx(0);
+      setFlipped(false);
+      setQuizAnswers({});
+      setQuizSubmitted(false);
     } catch (error) {
       console.error(error);
-      alert('Failed to process document. Check console for details.');
+      alert('Gagal memproses dokumen. Lihat console untuk detail.');
     } finally {
       setLoading(false);
     }
   };
 
-  const toggleCardFlip = (id: number) => {
-    setFlippedCards(prev => ({ ...prev, [id]: !prev[id] }));
-  };
-
-  const handleQuizAnswer = (questionId: number, option: string) => {
+  const handleQuizAnswer = (qId: number, opt: string) => {
     if (quizSubmitted) return;
-    setQuizAnswers(prev => ({ ...prev, [questionId]: option }));
+    setQuizAnswers(prev => ({ ...prev, [qId]: opt }));
   };
 
-  const submitQuiz = () => {
-    setQuizSubmitted(true);
-  };
+  const score = payload
+    ? payload.quiz_exam.filter(q => quizAnswers[q.id] === q.correct_answer).length
+    : 0;
 
-  const resetQuiz = () => {
-    setQuizAnswers({});
-    setQuizSubmitted(false);
-  };
-
-  const tabs: { id: TabType; label: string; icon: React.ReactNode }[] = [
-    { id: 'summary', label: 'Modul Rangkuman', icon: <BookOpen size={18} /> },
-    { id: 'flashcards', label: 'Flashcards', icon: <Layers size={18} /> },
-    { id: 'quiz', label: 'Kuis & Ujian', icon: <HelpCircle size={18} /> },
-    { id: 'tutor', label: 'Socratic AI Tutor', icon: <Sparkles size={18} /> },
+  const tabs: { id: TabType; label: string; emoji: string }[] = [
+    { id: 'summary',    label: 'Rangkuman',  emoji: '📚' },
+    { id: 'flashcards', label: 'Flashcards', emoji: '📇' },
+    { id: 'quiz',       label: 'Kuis',       emoji: '🧠' },
+    { id: 'tutor',      label: 'AI Tutor',   emoji: '🤖' },
   ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 md:p-8">
-      <header className="max-w-6xl mx-auto mb-8">
+    <div className="min-h-screen bg-[#FAF8F5] p-4 md:p-8">
+
+      {/* ── HEADER ── */}
+      <header className="max-w-5xl mx-auto mb-8">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <div>
-            <h1 className="text-3xl md:text-4xl font-bold text-gray-900 flex items-center gap-2">
-              <span className="bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
-                BikinPaham.ai
-              </span>
-              <span className="text-sm bg-blue-100 text-blue-800 px-3 py-1 rounded-full">AI‑Powered Study Ecosystem</span>
+          {/* Logo */}
+          <div className="flex items-center gap-3">
+            <h1 className="text-3xl md:text-4xl font-black text-black tracking-tight">
+              BikinPaham<span className="text-black">.ai</span>
             </h1>
-            <p className="text-gray-600 mt-2">Unggah materi, dapatkan rangkuman, flashcards, kuis, dan tutor Socratic.</p>
+            <span className="bg-[#FFE600] border-2 border-black rounded-xl px-3 py-1 font-black text-sm shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+              ✨ AI Study
+            </span>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {(['SD_SMP', 'SMA_SMK', 'MAHASISWA'] as TargetLevel[]).map(level => (
+
+          {/* Level Pills */}
+          <div className="flex gap-2 flex-wrap">
+            {(Object.entries(LEVEL_CONFIG) as [TargetLevel, typeof LEVEL_CONFIG[TargetLevel]][]).map(([level, cfg]) => (
               <button
                 key={level}
                 onClick={() => setTargetLevel(level)}
-                className={`px-4 py-2 rounded-full text-sm font-medium transition ${targetLevel === level
-                    ? 'bg-blue-600 text-white shadow'
-                    : 'bg-white text-gray-700 hover:bg-gray-100'
+                className={`px-4 py-2 rounded-xl border-2 border-black font-bold text-sm transition-all
+                  ${targetLevel === level
+                    ? `${cfg.color} shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] -translate-x-0.5 -translate-y-0.5`
+                    : 'bg-white hover:bg-gray-50 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]'
                   }`}
               >
-                {level.replace('_', ' ')}
+                {cfg.emoji} {cfg.label}
               </button>
             ))}
           </div>
         </div>
+        <p className="text-gray-600 mt-3 font-medium">
+          Unggah materi → dapat rangkuman, flashcards, kuis, dan tutor Socratic sesuai level {LEVEL_CONFIG[targetLevel].label}.
+        </p>
       </header>
 
-      <main className="max-w-6xl mx-auto">
-        {/* Upload Section */}
-        <section className="bg-white rounded-2xl shadow-xl p-6 mb-8">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Upload size={20} /> Unggah Materi (PDF/Gambar)
+      <main className="max-w-5xl mx-auto space-y-6">
+
+        {/* ── UPLOAD CARD ── */}
+        <section className="bg-white border-2 border-black rounded-2xl p-6 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+          <h2 className="text-xl font-black text-black mb-4 flex items-center gap-2">
+            <Upload size={20} /> Unggah Materi
           </h2>
-          <div className="flex flex-col md:flex-row gap-4 items-start md:items-center">
-            <div className="flex-1">
-              <label className="block">
-                <span className="sr-only">Choose file</span>
-                <input
-                  type="file"
-                  accept=".pdf,image/*"
-                  onChange={handleFileChange}
-                  className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                />
-              </label>
-              {file && (
-                <p className="mt-2 text-sm text-gray-700">
-                  Selected: <strong>{file.name}</strong> ({Math.round(file.size / 1024)} KB)
-                </p>
-              )}
+
+          {/* Dropzone */}
+          <label className="block border-2 border-dashed border-black bg-[#FAF8F5] rounded-2xl p-8 text-center cursor-pointer hover:bg-[#FFF9E6] transition-colors">
+            <input
+              type="file"
+              accept=".pdf,image/*"
+              onChange={handleFileChange}
+              className="sr-only"
+            />
+            <div className="text-4xl mb-2">📄</div>
+            <p className="font-bold text-black">Klik untuk pilih file</p>
+            <p className="text-sm text-gray-500 mt-1">PDF atau Gambar (JPG, PNG)</p>
+          </label>
+
+          {/* Selected file */}
+          {file && (
+            <div className="mt-4 flex items-center justify-between bg-white border-2 border-black rounded-xl px-4 py-3 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+              <div>
+                <p className="font-bold text-black text-sm">{file.name}</p>
+                <p className="text-xs text-gray-500">{Math.round(file.size / 1024)} KB</p>
+              </div>
+              <button
+                onClick={() => setFile(null)}
+                className="bg-[#FECDD3] border-2 border-black rounded-lg p-1.5 hover:bg-red-300 transition-colors shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+              >
+                <X size={16} />
+              </button>
             </div>
-            <button
-              onClick={handleIngest}
-              disabled={loading || !file}
-              className="px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold rounded-full hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            >
-              {loading ? (
-                <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                  Memproses...
-                </>
-              ) : (
-                <>
-                  <Sparkles size={18} /> Proses Materi
-                </>
-              )}
-            </button>
-          </div>
-          <p className="text-sm text-gray-500 mt-4">
-            Sistem akan mengekstrak konten, membuat rangkuman, flashcards, dan kuis sesuai tingkat {targetLevel.replace('_', ' ')}.
-          </p>
+          )}
+
+          {/* Action Button */}
+          <button
+            onClick={handleIngest}
+            disabled={loading || !file}
+            className="mt-5 w-full bg-[#FFE600] hover:bg-[#FACC15] text-black font-black text-lg py-3 px-8 border-2 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-1 active:translate-y-1 active:shadow-none transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {loading ? (
+              <>
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-black" />
+                Memproses...
+              </>
+            ) : (
+              <><Sparkles size={20} /> Proses Materi</>
+            )}
+          </button>
         </section>
 
+        {/* ── WORKSPACE (post-ingest) ── */}
         {payload && (
-          <section className="bg-white rounded-2xl shadow-xl p-6">
-            {/* Tabs */}
-            <div className="flex flex-wrap border-b border-gray-200 mb-6">
+          <section className="bg-white border-2 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] overflow-hidden">
+
+            {/* Tab Bar */}
+            <div className="flex border-b-2 border-black overflow-x-auto">
               {tabs.map(tab => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-5 py-3 font-medium rounded-t-lg transition ${activeTab === tab.id
-                      ? 'bg-blue-50 text-blue-700 border-b-2 border-blue-600'
-                      : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                  className={`flex items-center gap-2 px-5 py-4 font-black text-sm whitespace-nowrap border-r-2 border-black transition-all
+                    ${activeTab === tab.id
+                      ? 'bg-[#FFE600] text-black'
+                      : 'bg-white text-gray-600 hover:bg-[#FAF8F5]'
                     }`}
                 >
-                  {tab.icon} {tab.label}
+                  <span>{tab.emoji}</span> {tab.label}
                 </button>
               ))}
             </div>
 
-            {/* Tab Content */}
-            <div className="min-h-[400px]">
-              {/* Summary Module */}
+            <div className="p-6">
+
+              {/* ── TAB 1: RANGKUMAN ── */}
               {activeTab === 'summary' && (
                 <div>
-                  <h3 className="text-2xl font-bold text-gray-900 mb-6">
-                    📚 Modul Rangkuman: {payload.document_meta.title}
-                  </h3>
-                  <div className="grid md:grid-cols-2 gap-6">
+                  <h3 className="text-2xl font-black text-black mb-2">📚 Modul Rangkuman</h3>
+                  <p className="text-gray-600 font-medium mb-6">{payload.document_meta.title}</p>
+                  <div className="grid md:grid-cols-2 gap-5">
                     {payload.summary_module.map((topic: SummaryTopic, idx) => (
-                      <div key={idx} className="bg-blue-50 border border-blue-100 rounded-xl p-5">
-                        <h4 className="text-lg font-semibold text-blue-900 mb-3">{topic.topic}</h4>
-                        <ul className="space-y-2 mb-4">
-                          {topic.key_points.map((point, i) => (
-                            <li key={i} className="flex items-start gap-2">
-                              <div className="w-2 h-2 bg-blue-500 rounded-full mt-2"></div>
-                              <span className="text-gray-800">{point}</span>
-                            </li>
-                          ))}
-                        </ul>
-                        <p className="text-gray-700 text-sm bg-white p-3 rounded-lg">{topic.explanation}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Flashcards */}
-              {activeTab === 'flashcards' && (
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900 mb-6">📇 Flashcards Interaktif</h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {payload.flashcards.map((card: FlashcardItem) => (
                       <div
-                        key={card.id}
-                        className="relative h-64 cursor-pointer [perspective:1000px]"
-                        onClick={() => toggleCardFlip(card.id)}
+                        key={idx}
+                        className="bg-white border-2 border-black rounded-2xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] transition-all"
                       >
-                        <div className={`absolute inset-0 rounded-2xl shadow-lg transition-all duration-500 [transform-style:preserve-3d] ${flippedCards[card.id] ? '[transform:rotateY(180deg)]' : ''}`}>
-                          {/* Front */}
-                          <div className="absolute inset-0 bg-gradient-to-br from-white to-blue-50 border-2 border-blue-200 rounded-2xl p-6 flex flex-col justify-center items-center [backface-visibility:hidden]">
-                            <div className="text-4xl mb-4">❓</div>
-                            <p className="text-lg font-semibold text-center text-gray-900">{card.front}</p>
-                            <p className="text-sm text-gray-500 mt-4">Click to flip</p>
-                          </div>
-                          {/* Back */}
-                          <div className="absolute inset-0 bg-gradient-to-br from-green-50 to-emerald-100 border-2 border-green-200 rounded-2xl p-6 flex flex-col justify-center items-center [backface-visibility:hidden] [transform:rotateY(180deg)]">
-                            <div className="text-4xl mb-4">💡</div>
-                            <p className="text-lg font-semibold text-center text-gray-900">{card.back}</p>
-                            <p className="text-sm text-gray-500 mt-4">Click to flip back</p>
+                        <div className={`${CARD_COLORS[idx % CARD_COLORS.length]} border-b-2 border-black px-5 py-3`}>
+                          <h4 className="font-black text-black">{topic.topic}</h4>
+                        </div>
+                        <div className="p-5">
+                          <ul className="space-y-2 mb-4">
+                            {topic.key_points.map((point, i) => (
+                              <li key={i} className="flex items-start gap-2">
+                                <span className="mt-1 w-3 h-3 bg-black rounded-sm shrink-0" />
+                                <span className="text-gray-800 text-sm">{point}</span>
+                              </li>
+                            ))}
+                          </ul>
+                          <div className="bg-[#FAF8F5] border-2 border-black rounded-xl p-3 text-sm text-gray-700">
+                            {topic.explanation}
                           </div>
                         </div>
                       </div>
@@ -288,161 +286,236 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Quiz */}
+              {/* ── TAB 2: FLASHCARDS ── */}
+              {activeTab === 'flashcards' && (
+                <div>
+                  <h3 className="text-2xl font-black text-black mb-6">📇 Flashcards</h3>
+
+                  {payload.flashcards.length > 0 && (() => {
+                    const card: FlashcardItem = payload.flashcards[currentCardIdx];
+                    return (
+                      <div className="flex flex-col items-center gap-6">
+                        {/* Progress */}
+                        <p className="text-sm font-bold text-gray-500">
+                          Kartu {currentCardIdx + 1} / {payload.flashcards.length}
+                        </p>
+
+                        {/* Flip card */}
+                        <div
+                          className="w-full max-w-xl h-64 cursor-pointer [perspective:1000px]"
+                          onClick={() => setFlipped(f => !f)}
+                        >
+                          <div className={`relative w-full h-full transition-all duration-500 [transform-style:preserve-3d] ${flipped ? '[transform:rotateY(180deg)]' : ''}`}>
+                            {/* Front */}
+                            <div className="absolute inset-0 bg-white border-2 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col items-center justify-center p-8 [backface-visibility:hidden]">
+                              <div className="text-4xl mb-4">❓</div>
+                              <p className="text-xl font-black text-black text-center">{card.front}</p>
+                              <p className="text-xs font-bold text-gray-400 mt-6 uppercase tracking-widest">Klik untuk Membalik</p>
+                            </div>
+                            {/* Back */}
+                            <div className="absolute inset-0 bg-[#86EFAC] border-2 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col items-center justify-center p-8 [backface-visibility:hidden] [transform:rotateY(180deg)]">
+                              <div className="text-4xl mb-4">💡</div>
+                              <p className="text-xl font-black text-black text-center">{card.back}</p>
+                              <p className="text-xs font-bold text-gray-600 mt-6 uppercase tracking-widest">Klik untuk Membalik</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Navigation */}
+                        <div className="flex gap-3">
+                          <button
+                            onClick={() => { setCurrentCardIdx(i => Math.max(0, i - 1)); setFlipped(false); }}
+                            disabled={currentCardIdx === 0}
+                            className="px-5 py-2 bg-white border-2 border-black rounded-xl font-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all disabled:opacity-30"
+                          >
+                            ← Prev
+                          </button>
+                          <button
+                            onClick={() => { setCurrentCardIdx(i => Math.min(payload.flashcards.length - 1, i + 1)); setFlipped(false); }}
+                            disabled={currentCardIdx === payload.flashcards.length - 1}
+                            className="px-5 py-2 bg-[#FFE600] border-2 border-black rounded-xl font-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all disabled:opacity-30"
+                          >
+                            Next →
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* ── TAB 3: KUIS ── */}
               {activeTab === 'quiz' && (
                 <div>
-                  <h3 className="text-2xl font-bold text-gray-900 mb-6">🧠 Kuis & Ujian</h3>
-                  <div className="space-y-8">
+                  <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+                    <h3 className="text-2xl font-black text-black">🧠 Kuis & Ujian</h3>
+                    {/* Score badge */}
+                    {quizSubmitted && (
+                      <div className="bg-[#FFE600] border-2 border-black rounded-xl px-5 py-2 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+                        <span className="font-black text-black text-lg">
+                          Skor: {score} / {payload.quiz_exam.length}
+                          {score === payload.quiz_exam.length ? ' 🎉' : score >= payload.quiz_exam.length / 2 ? ' 👍' : ' 💪'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-6">
                     {payload.quiz_exam.map((q: QuizQuestion) => {
                       const userAnswer = quizAnswers[q.id];
-                      const isCorrect = userAnswer === q.correct_answer;
                       return (
-                        <div key={q.id} className="border border-gray-200 rounded-xl p-6 bg-gray-50">
-                          <h4 className="text-lg font-semibold text-gray-900 mb-4">
-                            {q.id}. {q.question}
-                          </h4>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
-                            {q.options.map((opt, idx) => (
-                              <label
-                                key={idx}
-                                className={`flex items-center gap-3 p-4 rounded-lg border-2 cursor-pointer transition ${!quizSubmitted
-                                    ? 'border-gray-300 hover:border-blue-400 bg-white'
-                                    : opt === q.correct_answer
-                                      ? 'border-green-500 bg-green-50'
-                                      : userAnswer === opt
-                                        ? 'border-red-500 bg-red-50'
-                                        : 'border-gray-300 bg-white'
-                                  }`}
-                              >
-                                <input
-                                  type="radio"
-                                  name={`q${q.id}`}
-                                  value={opt}
-                                  checked={userAnswer === opt}
-                                  onChange={() => handleQuizAnswer(q.id, opt)}
-                                  disabled={quizSubmitted}
-                                  className="h-5 w-5"
-                                />
-                                <span className="flex-1">{opt}</span>
-                                {quizSubmitted && opt === q.correct_answer && (
-                                  <CheckCircle className="text-green-600" size={20} />
-                                )}
-                                {quizSubmitted && userAnswer === opt && userAnswer !== q.correct_answer && (
-                                  <XCircle className="text-red-600" size={20} />
-                                )}
-                              </label>
-                            ))}
+                        <div key={q.id} className="border-2 border-black rounded-2xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                          <div className="bg-[#FAF8F5] border-b-2 border-black px-5 py-3">
+                            <h4 className="font-black text-black">{q.id}. {q.question}</h4>
+                          </div>
+                          <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {q.options.map((opt, idx) => {
+                              let optStyle = 'bg-white hover:bg-[#FAF8F5] border-2 border-black';
+                              if (quizSubmitted) {
+                                if (opt === q.correct_answer) optStyle = 'bg-[#86EFAC] border-2 border-black';
+                                else if (userAnswer === opt) optStyle = 'bg-[#FECDD3] border-2 border-black';
+                                else optStyle = 'bg-white border-2 border-gray-300 opacity-60';
+                              } else if (userAnswer === opt) {
+                                optStyle = 'bg-[#7DD3FC] border-2 border-black';
+                              }
+                              return (
+                                <label
+                                  key={idx}
+                                  className={`flex items-center gap-3 p-4 rounded-xl cursor-pointer transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${optStyle}`}
+                                >
+                                  <input
+                                    type="radio"
+                                    name={`q${q.id}`}
+                                    value={opt}
+                                    checked={userAnswer === opt}
+                                    onChange={() => handleQuizAnswer(q.id, opt)}
+                                    disabled={quizSubmitted}
+                                    className="h-4 w-4 accent-black"
+                                  />
+                                  <span className="flex-1 font-medium text-sm">{opt}</span>
+                                  {quizSubmitted && opt === q.correct_answer && <CheckCircle size={18} className="text-green-700 shrink-0" />}
+                                  {quizSubmitted && userAnswer === opt && userAnswer !== q.correct_answer && <XCircle size={18} className="text-red-600 shrink-0" />}
+                                </label>
+                              );
+                            })}
                           </div>
                           {quizSubmitted && (
-                            <div className="p-4 bg-blue-50 rounded-lg">
-                              <p className="font-semibold text-blue-900">Penjelasan:</p>
-                              <p className="text-gray-800">{q.explanation}</p>
+                            <div className="mx-5 mb-5 bg-[#7DD3FC] border-2 border-black rounded-xl p-4">
+                              <p className="font-black text-black text-sm mb-1">💬 Penjelasan:</p>
+                              <p className="text-sm text-gray-800">{q.explanation}</p>
                             </div>
                           )}
                         </div>
                       );
                     })}
                   </div>
-                  <div className="flex gap-4 mt-8">
+
+                  <div className="flex gap-3 mt-8 flex-wrap">
                     <button
-                      onClick={submitQuiz}
+                      onClick={() => setQuizSubmitted(true)}
                       disabled={quizSubmitted || Object.keys(quizAnswers).length !== payload.quiz_exam.length}
-                      className="px-6 py-3 bg-green-600 text-white font-semibold rounded-full hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="px-6 py-3 bg-[#86EFAC] border-2 border-black rounded-xl font-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      Submit Jawaban
+                      ✅ Submit Jawaban
                     </button>
                     <button
-                      onClick={resetQuiz}
-                      className="px-6 py-3 bg-gray-200 text-gray-800 font-semibold rounded-full hover:bg-gray-300"
+                      onClick={() => { setQuizAnswers({}); setQuizSubmitted(false); }}
+                      className="px-6 py-3 bg-white border-2 border-black rounded-xl font-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all"
                     >
-                      Reset Kuis
+                      🔄 Reset Kuis
                     </button>
                   </div>
-                  <div className="mt-4 text-sm text-gray-600">
-                    {quizSubmitted ? (
-                      <p>
-                        Skor:{' '}
-                        <strong>
-                          {payload.quiz_exam.filter(q => quizAnswers[q.id] === q.correct_answer).length} / {payload.quiz_exam.length}
-                        </strong>
-                      </p>
-                    ) : (
-                      <p>
-                        Terjawab {Object.keys(quizAnswers).length} dari {payload.quiz_exam.length} soal.
-                      </p>
-                    )}
-                  </div>
+
+                  {!quizSubmitted && (
+                    <p className="mt-4 text-sm font-medium text-gray-500">
+                      Terjawab {Object.keys(quizAnswers).length} dari {payload.quiz_exam.length} soal.
+                    </p>
+                  )}
                 </div>
               )}
 
-              {/* Socratic Tutor */}
+              {/* ── TAB 4: TUTOR ── */}
               {activeTab === 'tutor' && (
                 <div>
-                  <h3 className="text-2xl font-bold text-gray-900 mb-6">🤖 Socratic AI Tutor</h3>
-                  <div className="border border-gray-200 rounded-xl overflow-hidden flex flex-col h-[500px]">
-                    {/* Chat messages */}
-                    <div className="flex-1 p-4 overflow-y-auto bg-gray-50 space-y-4">
+                  <h3 className="text-2xl font-black text-black mb-4">🤖 Socratic AI Tutor</h3>
+                  <div className="border-2 border-black rounded-2xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col h-[500px]">
+
+                    {/* Messages */}
+                    <div className="flex-1 p-4 overflow-y-auto bg-[#FAF8F5] space-y-4 flex flex-col">
+                      {messages.length === 0 && (
+                        <div className="flex-1 flex flex-col items-center justify-center text-center">
+                          <div className="text-5xl mb-3">🦉</div>
+                          <p className="font-black text-black text-lg">Halo! Saya Tutor Socratic.</p>
+                          <p className="text-gray-500 text-sm mt-1 max-w-xs">
+                            Saya tidak memberi jawaban langsung — saya bantu kamu berpikir sendiri. Tanya sesuatu!
+                          </p>
+                        </div>
+                      )}
                       {messages.map((m, idx) => (
                         <div
                           key={idx}
-                          className={`max-w-[80%] p-4 rounded-2xl ${m.role === 'user'
-                              ? 'bg-blue-600 text-white self-end ml-auto'
-                              : 'bg-white border border-gray-200 self-start'
-                            }`}
+                          className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}
                         >
-                          <div className="font-semibold mb-1">{m.role === 'user' ? 'Anda' : 'Tutor Socrates'}</div>
-                          <div className="whitespace-pre-wrap">{m.content}</div>
+                          {/* Avatar */}
+                          <div className={`w-9 h-9 rounded-xl border-2 border-black flex items-center justify-center shrink-0 font-black text-sm shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${m.role === 'user' ? 'bg-[#FFE600]' : 'bg-[#C084FC]'}`}>
+                            {m.role === 'user' ? <User size={16} /> : <Bot size={16} />}
+                          </div>
+                          {/* Bubble */}
+                          <div className={`max-w-[75%] border-2 border-black rounded-2xl p-4 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${m.role === 'user' ? 'bg-[#FFE600]' : 'bg-white'}`}>
+                            <p className="text-xs font-black text-gray-600 mb-1">{m.role === 'user' ? 'Kamu' : 'Tutor Socrates'}</p>
+                            <p className="text-sm whitespace-pre-wrap text-black">{m.content}</p>
+                          </div>
                         </div>
                       ))}
                       {chatLoading && (
-                        <div className="max-w-[80%] p-4 rounded-2xl bg-white border border-gray-200 self-start">
-                          <div className="flex gap-2">
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                        <div className="flex gap-3 flex-row">
+                          <div className="w-9 h-9 rounded-xl border-2 border-black bg-[#C084FC] flex items-center justify-center shrink-0 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+                            <Bot size={16} />
+                          </div>
+                          <div className="bg-white border-2 border-black rounded-2xl p-4 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center gap-1.5">
+                            <span className="w-2 h-2 bg-black rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-2 h-2 bg-black rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-2 h-2 bg-black rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                           </div>
                         </div>
                       )}
                       <div ref={messagesEndRef} />
                     </div>
 
-                    {/* Input form */}
-                    <form onSubmit={handleChatSubmit} className="border-t border-gray-200 p-4 bg-white">
-                      <div className="flex gap-2">
-                        <input
-                          value={input}
-                          onChange={(e) => setInput(e.target.value)}
-                          placeholder="Tanya tutor Socrates (misalnya: 'Bagaimana cara memahami konsep ini?')"
-                          className="flex-1 border border-gray-300 rounded-full px-5 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                        <button
-                          type="submit"
-                          disabled={chatLoading}
-                          className="px-6 py-3 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-semibold rounded-full hover:opacity-90 disabled:opacity-50"
-                        >
-                          Kirim
-                        </button>
-                      </div>
-                      <p className="text-sm text-gray-500 mt-2">
-                        Tutor akan membimbing dengan pertanyaan, bukan memberi jawaban langsung.
-                      </p>
+                    {/* Input */}
+                    <form onSubmit={handleChatSubmit} className="border-t-2 border-black p-4 bg-white flex gap-3">
+                      <input
+                        value={input}
+                        onChange={e => setInput(e.target.value)}
+                        placeholder="Tanya tentang materi ini..."
+                        className="flex-1 border-2 border-black rounded-xl px-4 py-2.5 font-medium text-sm focus:outline-none focus:bg-[#FFF9E6] bg-[#FAF8F5] transition-colors"
+                      />
+                      <button
+                        type="submit"
+                        disabled={chatLoading || !input.trim()}
+                        className="bg-[#FFE600] border-2 border-black rounded-xl px-5 py-2.5 font-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+                      >
+                        <Send size={16} /> Kirim
+                      </button>
                     </form>
                   </div>
+                  <p className="text-xs text-gray-500 font-medium mt-3">
+                    💡 Tutor membimbing dengan pertanyaan, bukan jawaban langsung.
+                  </p>
                 </div>
               )}
+
             </div>
           </section>
         )}
       </main>
 
-      <footer className="max-w-6xl mx-auto mt-12 text-center text-gray-500 text-sm">
-        <p>
-          BikinPaham.ai — Personalisasi belajar dengan AI. Powered by Gemini 2.0 Flash & Groq Llama 3.
-        </p>
-        <p className="mt-2">
-          Pastikan environment variables <code className="bg-gray-100 px-1 rounded">GEMINI_API_KEY</code> dan{' '}
-          <code className="bg-gray-100 px-1 rounded">GROQ_API_KEY</code> sudah diisi di <code className="bg-gray-100 px-1 rounded">.env.local</code>.
-        </p>
+      <footer className="max-w-5xl mx-auto mt-10 text-center">
+        <div className="inline-flex items-center gap-2 bg-white border-2 border-black rounded-2xl px-6 py-3 shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] text-sm font-medium text-gray-600">
+          <span>BikinPaham.ai</span>
+          <span className="text-gray-300">|</span>
+          <span>Powered by Gemini + Groq Llama 3</span>
+        </div>
       </footer>
     </div>
   );
