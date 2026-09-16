@@ -24,16 +24,16 @@ DO NOT give brief, lazy, or truncated summaries. Be comprehensive.
 OUTPUT REQUIREMENTS (STRICT QUANTITY & DEPTH):
 
 1. summary_module:
-   - Generate AT LEAST 5 to 8 detailed sub-topics covering the ENTIRE document.
+   - Generate 4 to 6 detailed sub-topics covering the ENTIRE document.
    - Each topic MUST have 3-5 comprehensive key_points.
    - The 'explanation' field MUST be a detailed multi-sentence explanation (minimum 100 words per topic), using analogies fitting for level: ${tone}.
 
 2. flashcards:
-   - Generate AT LEAST 10 to 15 distinct, high-value flashcards covering definitions, formulas, key concepts, and important facts.
+   - Generate 8 to 10 distinct, high-value flashcards covering definitions, formulas, key concepts, and important facts.
    - Front: Precise concept or question. Back: Clear, actionable definition or answer.
 
 3. quiz_exam:
-   - Generate EXACTLY 8 to 10 high-quality multiple-choice questions (options A, B, C, D).
+   - Generate 5 to 8 high-quality multiple-choice questions (options A, B, C, D).
    - The 'explanation' field MUST explain WHY the correct answer is right AND why the other options are wrong (minimum 2-3 sentences).
 
 Output schema (strict — no markdown fences, no extra commentary):
@@ -46,12 +46,38 @@ Output schema (strict — no markdown fences, no extra commentary):
 `.trim();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function stripFences(raw: string): string {
-  return raw
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
+
+/** Truncate extracted text to keep input tokens reasonable (~12k chars max) */
+function truncateText(text: string, maxChars = 12000): string {
+  return text.length > maxChars
+    ? text.slice(0, maxChars) + '\n[...content truncated for processing...]'
+    : text;
+}
+
+/** Clean, repair, and parse JSON from Gemini response */
+function cleanAndParseJSON(rawResponse: string): BikinPahamPayload {
+  try {
+    // 1. Strip markdown backticks if present
+    const cleaned = rawResponse
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+
+    // 2. Attempt standard parse
+    return JSON.parse(cleaned);
+  } catch {
+    // 3. Fallback: attempt soft closing bracket repair
+    let repaired = rawResponse.trim();
+    if (!repaired.endsWith('}')) {
+      if (repaired.includes('"quiz_exam": [') && !repaired.endsWith(']}')) {
+        repaired += ']}';
+      } else {
+        repaired += '}';
+      }
+    }
+    return JSON.parse(repaired);
+  }
 }
 
 /** Extract plain text from PPT/PPTX buffer */
@@ -123,8 +149,9 @@ export async function POST(request: NextRequest) {
     );
 
     const generationConfig = {
-      temperature:     0.4,
-      maxOutputTokens: 8192,
+      temperature:      0.4,
+      maxOutputTokens:  8192,
+      responseMimeType: 'application/json' as const,
     };
 
     const systemPrompt = SYSTEM_PROMPT(TONE[targetLevel]);
@@ -136,7 +163,7 @@ export async function POST(request: NextRequest) {
       if (!text.trim()) throw new Error('No text extracted from presentation file');
 
       result = await model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${text}` }] }],
+        contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${truncateText(text)}` }] }],
         generationConfig,
       });
 
@@ -147,7 +174,7 @@ export async function POST(request: NextRequest) {
       if (text.trim().length > 200) {
         // Text-based PDF: send as plain text
         result = await model.generateContent({
-          contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${text}` }] }],
+          contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${truncateText(text)}` }] }],
           generationConfig,
         });
       } else {
@@ -181,7 +208,7 @@ export async function POST(request: NextRequest) {
       // ── Unknown: treat as plain text ────────────────────────────────────────
       const text = buffer.toString('utf-8');
       result = await model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${text}` }] }],
+        contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\nDocument content:\n${truncateText(text)}` }] }],
         generationConfig,
       });
     }
@@ -189,7 +216,7 @@ export async function POST(request: NextRequest) {
     const raw = result.response.text();
     if (!raw) throw new Error('No content from Gemini');
 
-    const payload: BikinPahamPayload = JSON.parse(stripFences(raw));
+    const payload: BikinPahamPayload = cleanAndParseJSON(raw);
     payload.document_meta.target_level = targetLevel;
 
     // ── Persist to cache (non-blocking) ───────────────────────────────────────
