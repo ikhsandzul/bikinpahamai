@@ -10,31 +10,22 @@ const groq = new Groq({
 
 export async function POST(request: NextRequest) {
   try {
-    const { messages, context } = await request.json();
+    const { messages, context, summaryContext, target_level = 'SMA_SMK' } = await request.json();
 
     if (!groq.apiKey) {
       throw new Error('GROQ_API_KEY environment variable not set');
     }
 
-    // System prompt for Socratic tutor
-    const systemPrompt = `
-You are a Socratic AI Tutor for BikinPaham.ai. Your role is to guide students through understanding, NOT to give direct answers.
+    const learningContext = context || summaryContext || 'general learning';
 
-Rules:
-1. NEVER provide direct answers to quiz questions, homework problems, or exact solutions.
-2. Always respond with guiding questions, hints, analogies, and encouragement.
-3. Base your guidance on the provided learning context: ${context || 'general learning'}.
-4. Ask one step at a time. Help students discover answers themselves.
-5. Use positive reinforcement and celebrate small wins.
-
-Example:
-Student: "What's the answer to question 3?"
-You: "Let's break it down. What concept from the material do you think this question is testing? Can you recall the key points about that topic?"
-
-Student: "I don't understand this formula."
-You: "Great question! Let's start with what each variable represents. Which part of the formula feels most confusing?"
-
-Now begin the session.`;
+    // System prompt for Socratic tutor enforcing Bahasa Indonesia
+    const systemPrompt = `You are BikinPaham Socratic AI Tutor.
+- MANDATE: You MUST communicate ONLY in BAHASA INDONESIA.
+- Adapt your tone to the student's level (${target_level}) using natural Indonesian.
+- NEVER give direct answers to questions, homework, or exam problems.
+- Ask short, guiding questions (max 2-3 sentences) in Bahasa Indonesia to prompt the student to think.
+- Base your guidance on this learning context: ${learningContext}.
+- One step at a time. Help students discover answers themselves.`;
 
     const stream = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',

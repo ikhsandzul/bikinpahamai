@@ -107,22 +107,31 @@ interface QuizResult {
   quiz_exam: QuizQuestion[];
 }
 
-function getSummaryPrompt(docText: string, tone: string): string {
-  return `You are an educational curriculum expert.
+function getLanguageMandate(targetLevel: TargetLevel): string {
+  return `CRITICAL LANGUAGE MANDATE:
+- ALL generated text (topic names, key points, detailed explanations, flashcard fronts & backs, quiz questions, multiple-choice options, and quiz explanations) MUST be written strictly in BAHASA INDONESIA.
+- Even if the input document contains English text, technical terms, or academic standards (e.g., ACM, KKNI, Information Systems), translate and explain everything in clear, natural BAHASA INDONESIA tailored for ${targetLevel}.
+- DO NOT return English summaries, key points, or explanations under any circumstances.`;
+}
+
+function getSummaryPrompt(docText: string, tone: string, targetLevel: TargetLevel): string {
+  return `${getLanguageMandate(targetLevel)}
+
+You are an educational curriculum expert.
 Tone/Target level: ${tone}.
 Analyze the document text and produce a JSON object with:
-1. "title": A concise descriptive title of the document.
+1. "title": A concise descriptive title of the document in Bahasa Indonesia.
 2. "summary_module": Array of 5 to 8 detailed sub-topics covering the full document.
    Each item must have:
-   - "topic": Name of the sub-topic.
-   - "key_points": Array of 3-5 comprehensive key bullet points.
-   - "explanation": Detailed multi-sentence explanation (minimum 80-100 words) tailored to the target audience.
+   - "topic": Name of the sub-topic (Bahasa Indonesia).
+   - "key_points": Array of 3-5 comprehensive key bullet points (Bahasa Indonesia).
+   - "explanation": Detailed multi-sentence explanation (minimum 80-100 words in Bahasa Indonesia) tailored to the target audience.
 
 Output format (strictly valid JSON object):
 {
-  "title": "Document Title",
+  "title": "Judul Dokumen",
   "summary_module": [
-    { "topic": "string", "key_points": ["point 1", "point 2"], "explanation": "string" }
+    { "topic": "string", "key_points": ["poin 1", "poin 2"], "explanation": "string" }
   ]
 }
 
@@ -130,14 +139,16 @@ Document text:
 ${truncateText(docText)}`;
 }
 
-function getFlashcardPrompt(docText: string, tone: string): string {
-  return `You are an educational study expert.
+function getFlashcardPrompt(docText: string, tone: string, targetLevel: TargetLevel): string {
+  return `${getLanguageMandate(targetLevel)}
+
+You are an educational study expert.
 Tone/Target level: ${tone}.
-Generate 12 to 15 comprehensive flashcards covering all definitions, formulas, key concepts, and critical facts from the document.
+Generate 12 to 15 comprehensive flashcards covering all definitions, formulas, key concepts, and critical facts from the document, written strictly in Bahasa Indonesia.
 Each flashcard must have:
 - "id": number (starting from 1)
-- "front": Clear question, term, or prompt
-- "back": Precise, thorough answer or explanation
+- "front": Clear question, term, or prompt in Bahasa Indonesia
+- "back": Precise, thorough answer or explanation in Bahasa Indonesia
 
 Output format (strictly valid JSON object):
 {
@@ -150,16 +161,18 @@ Document text:
 ${truncateText(docText)}`;
 }
 
-function getQuizPrompt(docText: string, tone: string): string {
-  return `You are an exam and assessment expert.
+function getQuizPrompt(docText: string, tone: string, targetLevel: TargetLevel): string {
+  return `${getLanguageMandate(targetLevel)}
+
+You are an exam and assessment expert.
 Tone/Target level: ${tone}.
-Generate 8 to 10 high-quality multiple-choice questions testing understanding of the document.
+Generate 8 to 10 high-quality multiple-choice questions testing understanding of the document, written strictly in Bahasa Indonesia.
 Each item must have:
 - "id": number (starting from 1)
-- "question": Challenging, well-phrased question
-- "options": Exactly 4 distinct answer choices
+- "question": Challenging, well-phrased question in Bahasa Indonesia
+- "options": Exactly 4 distinct answer choices in Bahasa Indonesia
 - "correct_answer": Exact matching text of the correct option
-- "explanation": In-depth explanation explaining WHY the correct answer is right and why alternatives are wrong (2-3 sentences).
+- "explanation": In-depth explanation explaining WHY the correct answer is right and why alternatives are wrong in Bahasa Indonesia (2-3 sentences).
 
 Output format (strictly valid JSON object):
 {
@@ -270,9 +283,9 @@ export async function POST(request: NextRequest) {
 
     // ── Phase 2: Parallel Tasks Generation ──────────────────────────────────────
     const tone = TONE[targetLevel];
-    const summaryPrompt = getSummaryPrompt(documentText, tone);
-    const flashcardPrompt = getFlashcardPrompt(documentText, tone);
-    const quizPrompt = getQuizPrompt(documentText, tone);
+    const summaryPrompt = getSummaryPrompt(documentText, tone, targetLevel);
+    const flashcardPrompt = getFlashcardPrompt(documentText, tone, targetLevel);
+    const quizPrompt = getQuizPrompt(documentText, tone, targetLevel);
 
     const groqApiKey = process.env.GROQ_API_KEY;
     const groqModelName = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
