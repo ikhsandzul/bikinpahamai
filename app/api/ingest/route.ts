@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHash } from 'crypto';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { parseOffice } from 'officeparser';
 import { supabase } from '@/lib/supabase';
 import type { BikinPahamPayload, TargetLevel } from '@/types/payload';
 
@@ -15,7 +16,7 @@ const TONE: Record<TargetLevel, string> = {
 
 const SYSTEM_PROMPT = (tone: string) => `
 You are an expert educational content analyzer.
-Extract the uploaded document into a structured JSON output strictly following this schema:
+Extract the document content into a structured JSON output strictly following this schema:
 
 {
   "document_meta": { "title": string, "target_level": string },
@@ -32,9 +33,26 @@ Guidelines:
 - Output ONLY valid JSON. No markdown fences, no commentary.
 `.trim();
 
+/** Extract text from PPT/PPTX buffer using officeparser */
+async function parsePptBuffer(buffer: Buffer): Promise<string> {
+  // parseOffice is async and returns OfficeParserAST when awaited without callback
+  const ast = await parseOffice(buffer as unknown as Parameters<typeof parseOffice>[0]);
+  // OfficeParserAST exposes .toText() for plain text extraction
+  return (ast as unknown as { toText: () => string }).toText() ?? '';
+}
+
+/** Strip markdown fences from Gemini response */
+function stripFences(raw: string): string {
+  return raw
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const formData = await request.formData();
+    const formData   = await request.formData();
     const file        = formData.get('file') as File | null;
     const targetLevel = formData.get('target_level') as TargetLevel | null;
 
@@ -45,10 +63,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Valid target_level required' }, { status: 400 });
     }
 
-    // --- SHA-256 hash (buffer + target_level for level-scoped cache) ---
     const bytes  = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
-    const hash   = createHash('sha256')
+
+    const fileName = file.name.toLowerCase();
+    const isPpt    = fileName.endsWith('.ppt') || fileName.endsWith('.pptx');
+
+    // --- SHA-256 hash (buffer + target_level) ---
+    const hash = createHash('sha256')
       .update(buffer)
       .update(targetLevel)
       .digest('hex');
@@ -62,7 +84,6 @@ export async function POST(request: NextRequest) {
       .maybeSingle();
 
     if (dbError) {
-      // Non-fatal: log and fall through to Gemini
       console.warn('Supabase cache lookup error:', dbError.message);
     }
 
@@ -78,39 +99,39 @@ export async function POST(request: NextRequest) {
     const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
     const model     = genAI.getGenerativeModel({ model: modelName });
 
-    const mimeType = file.type || 'application/pdf';
-    const b64      = buffer.toString('base64');
+    let result;
 
-    const result = await model.generateContent([
-      SYSTEM_PROMPT(TONE[targetLevel]),
-      { inlineData: { mimeType, data: b64 } },
-    ]);
+    if (isPpt) {
+      // Extract slide text via officeparser, then send as plain text prompt
+      const extractedText = await parsePptBuffer(buffer);
+      if (!extractedText.trim()) throw new Error('No text extracted from presentation file');
+
+      result = await model.generateContent([
+        SYSTEM_PROMPT(TONE[targetLevel]),
+        `\n\nDocument content:\n${extractedText}`,
+      ]);
+    } else {
+      // PDF / Image: send as base64 inlineData
+      const mimeType = file.type || 'application/pdf';
+      const b64      = buffer.toString('base64');
+
+      result = await model.generateContent([
+        SYSTEM_PROMPT(TONE[targetLevel]),
+        { inlineData: { mimeType, data: b64 } },
+      ]);
+    }
 
     const raw = result.response.text();
     if (!raw) throw new Error('No content from Gemini');
 
-    // Strip optional markdown fences
-    const jsonStr = raw
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
-
-    const payload: BikinPahamPayload = JSON.parse(jsonStr);
+    const payload: BikinPahamPayload = JSON.parse(stripFences(raw));
     payload.document_meta.target_level = targetLevel;
 
     // --- Persist to cache (non-blocking, non-fatal) ---
     supabase
       .from('materials')
-      .insert({
-        file_hash:    hash,
-        target_level: targetLevel,
-        title:        payload.document_meta.title,
-        payload,
-      })
-      .then(({ error }) => {
-        if (error) console.warn('Supabase insert error:', error.message);
-      });
+      .insert({ file_hash: hash, target_level: targetLevel, title: payload.document_meta.title, payload })
+      .then(({ error }) => { if (error) console.warn('Supabase insert error:', error.message); });
 
     return NextResponse.json({ cached: false, payload });
   } catch (error) {

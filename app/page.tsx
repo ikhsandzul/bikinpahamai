@@ -118,10 +118,17 @@ export default function Home() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
-    if (selected && (selected.type === 'application/pdf' || selected.type.startsWith('image/'))) {
+    if (selected && (
+      selected.type === 'application/pdf' ||
+      selected.type.startsWith('image/') ||
+      selected.name.toLowerCase().endsWith('.ppt') ||
+      selected.name.toLowerCase().endsWith('.pptx') ||
+      selected.type === 'application/vnd.ms-powerpoint' ||
+      selected.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    )) {
       setFile(selected);
     } else {
-      alert('Upload file PDF atau gambar.');
+      alert('Upload file PDF, PPTX, atau gambar.');
     }
   };
 
@@ -211,21 +218,41 @@ export default function Home() {
           <label className="block border-2 border-dashed border-black bg-[#FAF8F5] rounded-2xl p-8 text-center cursor-pointer hover:bg-[#FFF9E6] transition-colors">
             <input
               type="file"
-              accept=".pdf,image/*"
+              accept=".pdf,.png,.jpg,.jpeg,.txt,.ppt,.pptx"
               onChange={handleFileChange}
               className="sr-only"
             />
             <div className="text-4xl mb-2">📄</div>
             <p className="font-bold text-black">Klik untuk pilih file</p>
-            <p className="text-sm text-gray-500 mt-1">PDF atau Gambar (JPG, PNG)</p>
+            <p className="text-sm text-gray-500 mt-1">PDF, PPTX, atau Gambar (PNG, JPG)</p>
           </label>
 
           {/* Selected file */}
           {file && (
             <div className="mt-4 flex items-center justify-between bg-white border-2 border-black rounded-xl px-4 py-3 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
-              <div>
-                <p className="font-bold text-black text-sm">{file.name}</p>
-                <p className="text-xs text-gray-500">{Math.round(file.size / 1024)} KB</p>
+              <div className="flex items-center gap-3">
+                {/* File type badge */}
+                {(() => {
+                  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+                  const badgeMap: Record<string, string> = {
+                    pdf:  'bg-[#FECDD3]',
+                    ppt:  'bg-[#FDBA74]',
+                    pptx: 'bg-[#FDBA74]',
+                    png:  'bg-[#7DD3FC]',
+                    jpg:  'bg-[#7DD3FC]',
+                    jpeg: 'bg-[#7DD3FC]',
+                  };
+                  const cls = badgeMap[ext] ?? 'bg-[#E5E7EB]';
+                  return (
+                    <span className={`${cls} border-2 border-black rounded-lg px-2 py-0.5 font-black text-xs uppercase shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] shrink-0`}>
+                      {ext}
+                    </span>
+                  );
+                })()}
+                <div>
+                  <p className="font-bold text-black text-sm">{file.name}</p>
+                  <p className="text-xs text-gray-500">{Math.round(file.size / 1024)} KB</p>
+                </div>
               </div>
               <button
                 onClick={() => setFile(null)}
