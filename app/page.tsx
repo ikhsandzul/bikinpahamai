@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { TargetLevel, BikinPahamPayload, SummaryTopic, FlashcardItem, QuizQuestion } from '@/types/payload';
+import Logo from '@/components/Logo';
 import { Upload, BookOpen, Layers, HelpCircle, CheckCircle, XCircle, Sparkles, X, Send, Bot, User } from 'lucide-react';
 
 type TabType = 'summary' | 'flashcards' | 'quiz' | 'tutor';
@@ -14,11 +15,22 @@ const LEVEL_CONFIG: Record<TargetLevel, { label: string; color: string; emoji: s
 
 const CARD_COLORS = ['bg-[#C084FC]', 'bg-[#7DD3FC]', 'bg-[#86EFAC]', 'bg-[#FBCFE8]', 'bg-[#FFE600]'];
 
+const LOADING_STEPS = [
+  "📄 Membaca & mengekstrak dokumen...",
+  "🧠 Menganalisis konsep utama materi...",
+  "📝 Menyusun modul rangkuman...",
+  "🃏 Ngeracik flashcard interaktif...",
+  "🎯 Bikin soal kuis & simulasi ujian...",
+  "✨ Menyiapkan AI Socratic Tutor...",
+];
+
 export default function Home() {
   const [targetLevel, setTargetLevel] = useState<TargetLevel>('SMA_SMK');
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+  const [ingestError, setIngestError] = useState<string | null>(null);
   const [payload, setPayload] = useState<BikinPahamPayload | null>(null);
+  const [fromCache, setFromCache] = useState(false);
   const [activeTab, setActiveTab] = useState<TabType>('summary');
 
   // Flashcard state
@@ -35,6 +47,16 @@ export default function Home() {
   const [chatLoading, setChatLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Loading step state
+  const [loadingStep, setLoadingStep] = useState(0);
+  useEffect(() => {
+    if (!loading) { setLoadingStep(0); return; }
+    const id = setInterval(() => {
+      setLoadingStep(prev => (prev + 1) % LOADING_STEPS.length);
+    }, 1800);
+    return () => clearInterval(id);
+  }, [loading]);
+
   const handleChatSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || chatLoading) return;
@@ -45,14 +67,19 @@ export default function Home() {
     setChatLoading(true);
 
     try {
+      const summaryContext = payload
+        ? payload.summary_module
+            .map(t => `${t.topic}: ${t.key_points.join('; ')}`)
+            .join(' | ')
+        : '';
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: [...messages, { role: 'user', content: userMessage }],
-          context: payload
-            ? `Document: ${payload.document_meta.title}. Topics: ${payload.summary_module.map(s => s.topic).join(', ')}`
-            : 'General learning',
+          summaryContext,
+          target_level: targetLevel,
         }),
       });
 
@@ -101,6 +128,7 @@ export default function Home() {
   const handleIngest = async () => {
     if (!file) { alert('Pilih file terlebih dahulu.'); return; }
     setLoading(true);
+    setIngestError(null);
     const formData = new FormData();
     formData.append('file', file);
     formData.append('target_level', targetLevel);
@@ -108,15 +136,17 @@ export default function Home() {
       const res = await fetch('/api/ingest', { method: 'POST', body: formData });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       const data = await res.json();
-      setPayload(data);
+      setPayload(data.payload);
+      setFromCache(data.cached === true);
       setActiveTab('summary');
       setCurrentCardIdx(0);
       setFlipped(false);
       setQuizAnswers({});
       setQuizSubmitted(false);
+      setFromCache(false);
     } catch (error) {
       console.error(error);
-      alert('Gagal memproses dokumen. Lihat console untuk detail.');
+      setIngestError(error instanceof Error ? error.message : 'Gagal memproses dokumen.');
     } finally {
       setLoading(false);
     }
@@ -145,14 +175,7 @@ export default function Home() {
       <header className="max-w-5xl mx-auto mb-8">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           {/* Logo */}
-          <div className="flex items-center gap-3">
-            <h1 className="text-3xl md:text-4xl font-black text-black tracking-tight">
-              BikinPaham<span className="text-black">.ai</span>
-            </h1>
-            <span className="bg-[#FFE600] border-2 border-black rounded-xl px-3 py-1 font-black text-sm shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
-              ✨ AI Study
-            </span>
-          </div>
+          <Logo />
 
           {/* Level Pills */}
           <div className="flex gap-2 flex-wrap">
@@ -213,7 +236,55 @@ export default function Home() {
             </div>
           )}
 
-          {/* Action Button */}
+          {/* Multi-step progress card */}
+          {loading && (
+            <div className="mt-5 bg-white border-2 border-black rounded-2xl p-5 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+              <p className="font-black text-black text-sm mb-4">⏳ Sedang diproses oleh AI...</p>
+              <div className="space-y-2">
+                {LOADING_STEPS.map((step, idx) => {
+                  const done    = idx < loadingStep;
+                  const active  = idx === loadingStep;
+                  return (
+                    <div
+                      key={idx}
+                      className={`flex items-center gap-3 px-4 py-2.5 rounded-xl border-2 transition-all duration-300
+                        ${active  ? 'border-black bg-[#FFE600] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] -translate-x-0.5 -translate-y-0.5' :
+                          done    ? 'border-black bg-[#86EFAC]' :
+                                    'border-gray-200 bg-[#FAF8F5] opacity-50'}`}
+                    >
+                      <span className="text-base leading-none">
+                        {done ? '✅' : active ? '⚙️' : '⬜'}
+                      </span>
+                      <span className={`text-sm ${active ? 'font-black text-black' : done ? 'font-bold text-gray-700 line-through' : 'font-medium text-gray-400'}`}>
+                        {step}
+                      </span>
+                      {active && (
+                        <div className="ml-auto flex gap-1">
+                          <span className="w-1.5 h-1.5 bg-black rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                          <span className="w-1.5 h-1.5 bg-black rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                          <span className="w-1.5 h-1.5 bg-black rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Error banner */}
+          {ingestError && (
+            <div className="mt-4 flex items-start gap-3 bg-[#FECDD3] border-2 border-black rounded-xl p-4 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+              <span className="text-xl">❌</span>
+              <div className="flex-1">
+                <p className="font-black text-black text-sm">Gagal memproses dokumen</p>
+                <p className="text-xs text-gray-700 mt-1 break-all">{ingestError}</p>
+              </div>
+              <button onClick={() => setIngestError(null)} className="text-gray-500 hover:text-black">
+                <X size={16} />
+              </button>
+            </div>
+          )}
           <button
             onClick={handleIngest}
             disabled={loading || !file}
@@ -221,8 +292,8 @@ export default function Home() {
           >
             {loading ? (
               <>
-                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-black" />
-                Memproses...
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-black shrink-0" />
+                <span className="truncate">{LOADING_STEPS[loadingStep]}</span>
               </>
             ) : (
               <><Sparkles size={20} /> Proses Materi</>
@@ -233,6 +304,14 @@ export default function Home() {
         {/* ── WORKSPACE (post-ingest) ── */}
         {payload && (
           <section className="bg-white border-2 border-black rounded-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] overflow-hidden">
+
+            {/* Cache badge */}
+            {fromCache && (
+              <div className="flex items-center gap-2 px-5 py-3 border-b-2 border-black bg-[#86EFAC]">
+                <span className="text-lg">⚡</span>
+                <span className="font-black text-black text-sm">Dimuat dari Cache (0 Token digunakan!)</span>
+              </div>
+            )}
 
             {/* Tab Bar */}
             <div className="flex border-b-2 border-black overflow-x-auto">

@@ -1,78 +1,59 @@
 import { NextRequest } from 'next/server';
-import Groq from 'groq-sdk';
+import { streamText } from 'ai';
+import { createGroq } from '@ai-sdk/groq';
+import type { TargetLevel } from '@/types/payload';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY || '',
-});
+const TONE_LABEL: Record<TargetLevel, string> = {
+  SD_SMP:    'elementary/middle school student (simple words, fun tone)',
+  SMA_SMK:   'high school student (exam-focused, clear and concise)',
+  MAHASISWA: 'university student (academic, analytical)',
+};
 
 export async function POST(request: NextRequest) {
   try {
-    const { messages, context } = await request.json();
+    const {
+      messages,
+      summaryContext,
+      target_level,
+    }: {
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+      summaryContext?: string;
+      target_level?: TargetLevel;
+    } = await request.json();
 
-    if (!process.env.GROQ_API_KEY) {
-      throw new Error('GROQ_API_KEY environment variable not set');
-    }
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
-    const systemPrompt = `You are a Socratic AI Tutor for BikinPaham.ai. Your role is to guide students through understanding, NOT to give direct answers.
+    const groq = createGroq({ apiKey });
 
-Rules:
-1. NEVER provide direct answers to quiz questions, homework problems, or exact solutions.
-2. Always respond with guiding questions, hints, analogies, and encouragement.
-3. Base your guidance on the provided learning context: ${context || 'general learning'}.
-4. Ask one step at a time. Help students discover answers themselves.
-5. Use positive reinforcement and celebrate small wins.
+    const level     = target_level ?? 'SMA_SMK';
+    const toneLabel = TONE_LABEL[level];
+    const context   = summaryContext?.trim() || 'general learning material';
 
-Example:
-Student: "What's the answer to question 3?"
-You: "Let's break it down. What concept from the material do you think this question is testing? Can you recall the key points about that topic?"
+    const systemPrompt =
+      `You are BikinPaham Socratic AI Tutor.\n` +
+      `Rule 1: NEVER give direct answers to questions or homework.\n` +
+      `Rule 2: Ask short, guiding questions (max 2-3 sentences) based on the provided material context to help the student think.\n` +
+      `Rule 3: Adapt your tone to a ${toneLabel}.\n` +
+      `Context: ${context}`;
 
-Student: "I don't understand this formula."
-You: "Great question! Let's start with what each variable represents. Which part of the formula feels most confusing?"
-
-Now begin the session.`;
-
-    const stream = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...messages,
-      ],
-      stream: true,
+    const result = streamText({
+      model: groq('llama-3.3-70b-versatile'),
+      system: systemPrompt,
+      messages,
       temperature: 0.7,
-      max_tokens: 1024,
+      maxOutputTokens: 512,
     });
 
-    // Convert Groq stream to ReadableStream
-    const encoder = new TextEncoder();
-    const readableStream = new ReadableStream({
-      async start(controller) {
-        try {
-          for await (const chunk of stream) {
-            const content = chunk.choices[0]?.delta?.content;
-            if (content) {
-              controller.enqueue(encoder.encode(content));
-            }
-          }
-        } finally {
-          controller.close();
-        }
-      },
-    });
-
-    return new Response(readableStream, {
-      headers: {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Cache-Control': 'no-cache',
-      },
-    });
+    return result.toTextStreamResponse();
   } catch (error) {
     console.error('Chat error:', error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown chat error' }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
+      { status: 500, headers: { 'Content-Type': 'application/json' } },
     );
   }
 }
