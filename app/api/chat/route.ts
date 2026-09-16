@@ -1,59 +1,124 @@
-import { NextRequest } from 'next/server';
-import { streamText } from 'ai';
-import { createGroq } from '@ai-sdk/groq';
-import type { TargetLevel } from '@/types/payload';
+import { NextResponse } from 'next/server';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
-const TONE_LABEL: Record<TargetLevel, string> = {
-  SD_SMP:    'elementary/middle school student (simple words, fun tone)',
-  SMA_SMK:   'high school student (exam-focused, clear and concise)',
-  MAHASISWA: 'university student (academic, analytical)',
-};
-
-export async function POST(request: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const {
-      messages,
-      summaryContext,
-      target_level,
-    }: {
-      messages: Array<{ role: 'user' | 'assistant'; content: string }>;
-      summaryContext?: string;
-      target_level?: TargetLevel;
-    } = await request.json();
+    const { messages, context, targetLevel } = await req.json();
 
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) throw new Error('GROQ_API_KEY not set');
+    const groqKey = process.env.GROQ_API_KEY;
+    const geminiKey = process.env.GEMINI_API_KEY;
 
-    const groq = createGroq({ apiKey });
+    const systemPrompt = `Anda adalah Tutor AI Socrates dari BikinPaham.ai.
+MANDAT UTAMA:
+1. Wajib 100% menggunakan Bahasa Indonesia yang ramah, komunikatif, dan sesuai level: ${targetLevel || 'SMA_SMK'}.
+2. DILARANG KERAS memberikan jawaban langsung atas pertanyaan/soal murid!
+3. Jawab HANYA dengan 1-2 pertanyaan pemandu yang memancing pemikiran kritis murid berdasarkan konteks materi ini.
 
-    const level     = target_level ?? 'SMA_SMK';
-    const toneLabel = TONE_LABEL[level];
-    const context   = summaryContext?.trim() || 'general learning material';
+Konteks Materi Upload:
+${typeof context === 'string' ? context : JSON.stringify(context || 'Materi Umum')}`;
 
-    const systemPrompt =
-      `You are BikinPaham Socratic AI Tutor.\n` +
-      `Rule 1: NEVER give direct answers to questions or homework.\n` +
-      `Rule 2: Ask short, guiding questions (max 2-3 sentences) based on the provided material context to help the student think.\n` +
-      `Rule 3: Adapt your tone to a ${toneLabel}.\n` +
-      `Context: ${context}`;
+    const formattedMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages.map((m: { role: string; content: string }) => ({
+        role: m.role,
+        content: m.content,
+      })),
+    ];
 
-    const result = streamText({
-      model: groq('llama-3.3-70b-versatile'),
-      system: systemPrompt,
-      messages,
-      temperature: 0.7,
-      maxOutputTokens: 512,
-    });
+    // 1. Try Groq Primary
+    if (groqKey) {
+      try {
+        const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${groqKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'llama-3.3-70b-versatile',
+            messages: formattedMessages,
+            stream: true,
+            temperature: 0.6,
+          }),
+        });
 
-    return result.toTextStreamResponse();
-  } catch (error) {
-    console.error('Chat error:', error);
-    return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown chat error' }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } },
-    );
+        if (groqRes.ok && groqRes.body) {
+          return new Response(groqRes.body, {
+            headers: {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            },
+          });
+        }
+
+        const errText = await groqRes.text();
+        console.error('Groq returned error, falling back to Gemini:', groqRes.status, errText);
+      } catch (groqErr) {
+        console.error('Groq fetch failed, attempting fallback:', groqErr);
+      }
+    }
+
+    // 2. Fallback: Google Gemini
+    if (geminiKey) {
+      const genAI = new GoogleGenerativeAI(geminiKey);
+      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+      // Transform messages to Gemini contents format
+      const historyContents = messages.slice(0, -1).map((m: { role: string; content: string }) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }));
+
+      const lastUserMsg = messages[messages.length - 1]?.content || 'Halo';
+
+      const chat = model.startChat({
+        history: [
+          { role: 'user', parts: [{ text: `System instruction:\n${systemPrompt}` }] },
+          { role: 'model', parts: [{ text: 'Paham. Saya akan bertindak sebagai Tutor AI Socrates dalam Bahasa Indonesia.' }] },
+          ...historyContents,
+        ],
+      });
+
+      const geminiStream = await chat.sendMessageStream(lastUserMsg);
+      const encoder = new TextEncoder();
+
+      const readable = new ReadableStream({
+        async start(controller) {
+          try {
+            for await (const chunk of geminiStream.stream) {
+              const text = chunk.text();
+              if (text) {
+                // Format chunk as OpenAI SSE compatible format
+                const sseData = JSON.stringify({
+                  choices: [{ delta: { content: text } }],
+                });
+                controller.enqueue(encoder.encode(`data: ${sseData}\n\n`));
+              }
+            }
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          } catch (e) {
+            controller.error(e);
+          }
+        },
+      });
+
+      return new Response(readable, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
+    return NextResponse.json({ error: 'Tidak ada API Key yang valid (Groq / Gemini)' }, { status: 500 });
+  } catch (err: any) {
+    console.error('Route error in /api/chat:', err);
+    return NextResponse.json({ error: err.message || 'Server Error' }, { status: 500 });
   }
 }
+

@@ -56,27 +56,91 @@ function truncateText(text: string, maxChars = 12000): string {
 
 /** Clean, repair, and parse JSON from Gemini response */
 function cleanAndParseJSON(rawResponse: string): BikinPahamPayload {
-  try {
-    // 1. Strip markdown backticks if present
-    const cleaned = rawResponse
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/, '')
-      .trim();
+  let text = rawResponse.trim();
 
-    // 2. Attempt standard parse
-    return JSON.parse(cleaned);
+  // 1. Strip markdown code fences if present
+  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+  // 2. Direct parse attempt
+  try {
+    return JSON.parse(text);
   } catch {
-    // 3. Fallback: attempt soft closing bracket repair
-    let repaired = rawResponse.trim();
-    if (!repaired.endsWith('}')) {
-      if (repaired.includes('"quiz_exam": [') && !repaired.endsWith(']}')) {
-        repaired += ']}';
-      } else {
-        repaired += '}';
+    // continue to repair
+  }
+
+  // 3. Extract outermost JSON object { ... }
+  const firstBrace = text.indexOf('{');
+  if (firstBrace !== -1) {
+    text = text.slice(firstBrace);
+  }
+
+  // 4. Handle truncated response or malformed trailing tokens
+  // If JSON was cut off in the middle of a string or array/object:
+  let repaired = text;
+
+  // If last open quote not closed, close it
+  const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
+  if (quoteCount % 2 !== 0) {
+    repaired += '"';
+  }
+
+  // Remove incomplete trailing key-values like `"correct_answer":` or dangling comma
+  repaired = repaired.replace(/,\s*"[^"]*":\s*$/g, '');
+  repaired = repaired.replace(/,\s*$/g, '');
+
+  // Balance brackets and braces
+  let openBraces = 0;
+  let openBrackets = 0;
+  let inString = false;
+
+  for (let i = 0; i < repaired.length; i++) {
+    const char = repaired[i];
+    const prev = i > 0 ? repaired[i - 1] : '';
+
+    if (char === '"' && prev !== '\\') {
+      inString = !inString;
+      continue;
+    }
+
+    if (!inString) {
+      if (char === '{') openBraces++;
+      else if (char === '}') openBraces = Math.max(0, openBraces - 1);
+      else if (char === '[') openBrackets++;
+      else if (char === ']') openBrackets = Math.max(0, openBrackets - 1);
+    }
+  }
+
+  // Close open brackets and braces
+  while (openBrackets > 0) {
+    repaired += ']';
+    openBrackets--;
+  }
+  while (openBraces > 0) {
+    repaired += '}';
+    openBraces--;
+  }
+
+  try {
+    return JSON.parse(repaired);
+  } catch {
+    // 5. Aggressive regex-based fallback: slice back to last known complete item
+    // Try rolling back to the last valid closing curly brace or bracket
+    const lastValidClosing = Math.max(repaired.lastIndexOf('},'), repaired.lastIndexOf('}]'));
+    if (lastValidClosing !== -1) {
+      let trimmed = repaired.slice(0, lastValidClosing + 1);
+      if (trimmed.includes('"quiz_exam":') && !trimmed.endsWith(']}')) {
+        trimmed += ']}';
+      } else if (!trimmed.endsWith('}')) {
+        trimmed += '}';
+      }
+      try {
+        return JSON.parse(trimmed);
+      } catch (e) {
+        console.error('Aggressive JSON rollback failed:', e);
       }
     }
-    return JSON.parse(repaired);
+
+    throw new Error(`JSON response from AI was truncated or invalid: ${rawResponse.slice(-150)}`);
   }
 }
 

@@ -42,9 +42,10 @@ export default function Home() {
   const [quizSubmitted, setQuizSubmitted] = useState(false);
 
   // Chat state
-  const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
-  const [input, setInput] = useState('');
-  const [chatLoading, setChatLoading] = useState(false);
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Loading step state
@@ -57,64 +58,86 @@ export default function Home() {
     return () => clearInterval(id);
   }, [loading]);
 
-  const handleChatSubmit = async (e: React.FormEvent) => {
+  const handleSendChat = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || chatLoading) return;
+    if (!chatInput.trim() || isChatLoading) return;
 
-    const userMessage = input.trim();
-    setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
-    setChatLoading(true);
+    const userMsg = chatInput.trim();
+    setChatInput('');
+    setChatError(null);
+    const newMessages = [...chatMessages, { role: 'user' as const, content: userMsg }];
+    setChatMessages(newMessages);
+    setIsChatLoading(true);
+
+    // Add empty placeholder for streaming assistant answer
+    setChatMessages(prev => [...prev, { role: 'assistant', content: '' }]);
 
     try {
-      const summaryContext = payload
-        ? payload.summary_module
-            .map(t => `${t.topic}: ${t.key_points.join('; ')}`)
-            .join(' | ')
-        : '';
-
-      const response = await fetch('/api/chat', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: [...messages, { role: 'user', content: userMessage }],
-          summaryContext,
-          target_level: targetLevel,
+          messages: newMessages,
+          context: payload?.summary_module || 'Materi Umum',
+          targetLevel: targetLevel,
         }),
       });
 
-      if (!response.ok) throw new Error('Chat API error');
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        const msg = errorData?.error || `HTTP ${res.status}: Gagal terhubung ke Tutor AI`;
+        throw new Error(msg);
+      }
 
-      const reader = response.body?.getReader();
+      if (!res.body) throw new Error('No stream response');
+      const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let assistantMessage = '';
+      let accumulatedText = '';
 
-      setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value);
-          assistantMessage += chunk;
-          setMessages(prev => {
-            const next = [...prev];
-            next[next.length - 1] = { role: 'assistant', content: assistantMessage };
-            return next;
-          });
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+            try {
+              const json = JSON.parse(line.replace('data: ', ''));
+              const content = json.choices?.[0]?.delta?.content || '';
+              accumulatedText += content;
+
+              setChatMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { role: 'assistant', content: accumulatedText };
+                return updated;
+              });
+            } catch (e) {
+              // ignore JSON parse partial chunk errors
+            }
+          }
         }
       }
-    } catch (error) {
-      console.error('Chat error:', error);
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Maaf, terjadi kesalahan. Coba lagi.' }]);
+    } catch (err: any) {
+      console.error(err);
+      setChatError(err.message || 'Gagal terhubung ke Tutor AI. Silakan coba kirim ulang.');
+      setChatMessages(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          role: 'assistant',
+          content: 'Maaf, terjadi kesalahan saat terhubung dengan Tutor AI.',
+        };
+        return updated;
+      });
     } finally {
-      setChatLoading(false);
+      setIsChatLoading(false);
     }
   };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [chatMessages, isChatLoading]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
@@ -544,11 +567,19 @@ export default function Home() {
               {activeTab === 'tutor' && (
                 <div>
                   <h3 className="text-2xl font-black text-black mb-4">🤖 Socratic AI Tutor</h3>
+                  
+                  {chatError && (
+                    <div className="mb-4 bg-red-100 border-2 border-red-500 text-red-700 px-4 py-3 rounded-xl font-bold text-sm shadow-[2px_2px_0px_0px_rgba(239,68,68,1)] flex items-center justify-between">
+                      <span>{chatError}</span>
+                      <button onClick={() => setChatError(null)} className="font-black text-lg ml-2 hover:opacity-70">✕</button>
+                    </div>
+                  )}
+
                   <div className="border-2 border-black rounded-2xl overflow-hidden shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] flex flex-col h-[500px]">
 
                     {/* Messages */}
                     <div className="flex-1 p-4 overflow-y-auto bg-[#FAF8F5] space-y-4 flex flex-col">
-                      {messages.length === 0 && (
+                      {chatMessages.length === 0 && (
                         <div className="flex-1 flex flex-col items-center justify-center text-center">
                           <div className="text-5xl mb-3">🦉</div>
                           <p className="font-black text-black text-lg">Halo! Saya Tutor Socratic.</p>
@@ -557,31 +588,35 @@ export default function Home() {
                           </p>
                         </div>
                       )}
-                      {messages.map((m, idx) => (
-                        <div
-                          key={idx}
-                          className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}
-                        >
-                          {/* Avatar */}
-                          <div className={`w-9 h-9 rounded-xl border-2 border-black flex items-center justify-center shrink-0 font-black text-sm shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${m.role === 'user' ? 'bg-[#FFE600]' : 'bg-[#C084FC]'}`}>
-                            {m.role === 'user' ? <User size={16} /> : <Bot size={16} />}
+                      {chatMessages.map((m, idx) => {
+                        // Skip empty assistant placeholder while loading if we have pulsing indicator
+                        if (m.role === 'assistant' && !m.content && isChatLoading && idx === chatMessages.length - 1) {
+                          return null;
+                        }
+                        return (
+                          <div
+                            key={idx}
+                            className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}
+                          >
+                            {/* Avatar */}
+                            <div className={`w-9 h-9 rounded-xl border-2 border-black flex items-center justify-center shrink-0 font-black text-sm shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${m.role === 'user' ? 'bg-[#FFE600]' : 'bg-[#C084FC]'}`}>
+                              {m.role === 'user' ? <User size={16} /> : <Bot size={16} />}
+                            </div>
+                            {/* Neo-Brutalist Bubble */}
+                            <div className={`max-w-[75%] border-2 border-black rounded-xl p-4 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] text-black ${m.role === 'user' ? 'bg-[#FFE600]' : 'bg-white'}`}>
+                              <p className="text-xs font-black text-gray-600 mb-1">{m.role === 'user' ? 'Kamu' : 'Tutor Socrates'}</p>
+                              <p className="text-sm whitespace-pre-wrap">{m.content}</p>
+                            </div>
                           </div>
-                          {/* Bubble */}
-                          <div className={`max-w-[75%] border-2 border-black rounded-2xl p-4 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${m.role === 'user' ? 'bg-[#FFE600]' : 'bg-white'}`}>
-                            <p className="text-xs font-black text-gray-600 mb-1">{m.role === 'user' ? 'Kamu' : 'Tutor Socrates'}</p>
-                            <p className="text-sm whitespace-pre-wrap text-black">{m.content}</p>
-                          </div>
-                        </div>
-                      ))}
-                      {chatLoading && (
-                        <div className="flex gap-3 flex-row">
+                        );
+                      })}
+                      {isChatLoading && (chatMessages.length === 0 || !chatMessages[chatMessages.length - 1].content) && (
+                        <div className="flex gap-3 flex-row items-center">
                           <div className="w-9 h-9 rounded-xl border-2 border-black bg-[#C084FC] flex items-center justify-center shrink-0 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
                             <Bot size={16} />
                           </div>
-                          <div className="bg-white border-2 border-black rounded-2xl p-4 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] flex items-center gap-1.5">
-                            <span className="w-2 h-2 bg-black rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                            <span className="w-2 h-2 bg-black rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                            <span className="w-2 h-2 bg-black rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          <div className="bg-white border-2 border-black rounded-xl p-4 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] text-black animate-pulse flex items-center gap-2">
+                            <span className="text-sm font-bold">Tutor Socrates lagi mikir pertanyaan pemandu...</span>
                           </div>
                         </div>
                       )}
@@ -589,17 +624,17 @@ export default function Home() {
                     </div>
 
                     {/* Input */}
-                    <form onSubmit={handleChatSubmit} className="border-t-2 border-black p-4 bg-white flex gap-3">
+                    <form onSubmit={handleSendChat} className="border-t-2 border-black p-4 bg-white flex gap-3">
                       <input
-                        value={input}
-                        onChange={e => setInput(e.target.value)}
+                        value={chatInput}
+                        onChange={e => setChatInput(e.target.value)}
                         placeholder="Tanya tentang materi ini..."
-                        className="flex-1 border-2 border-black rounded-xl px-4 py-2.5 font-medium text-sm focus:outline-none focus:bg-[#FFF9E6] bg-[#FAF8F5] transition-colors"
+                        className="flex-1 border-2 border-black rounded-xl px-4 py-2.5 font-medium text-sm focus:outline-none focus:bg-[#FFF9E6] bg-[#FAF8F5] transition-colors text-black"
                       />
                       <button
                         type="submit"
-                        disabled={chatLoading || !input.trim()}
-                        className="bg-[#FFE600] border-2 border-black rounded-xl px-5 py-2.5 font-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+                        disabled={isChatLoading || !chatInput.trim()}
+                        className="bg-[#FFE600] border-2 border-black rounded-xl px-5 py-2.5 font-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 text-black cursor-pointer"
                       >
                         <Send size={16} /> Kirim
                       </button>
