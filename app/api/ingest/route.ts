@@ -1,155 +1,120 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHash } from 'crypto';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, type GenerateContentRequest } from '@google/generative-ai';
 import { parseOffice } from 'officeparser';
 import { supabase } from '@/lib/supabase';
-import type { BikinPahamPayload, TargetLevel } from '@/types/payload';
+import type { BikinPahamPayload, TargetLevel, SummaryTopic, FlashcardItem, QuizQuestion } from '@/types/payload';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
-// ─── Tone presets per level ───────────────────────────────────────────────────
+// ─── Tone presets ─────────────────────────────────────────────────────────────
 const TONE: Record<TargetLevel, string> = {
-  SD_SMP:    'elementary/middle school students — use simple vocabulary, cartoon and daily-life analogies, child-friendly tone, short sentences.',
-  SMA_SMK:   'high school students (UTBK exam level) — key formulas, quick tricks, exam-focused explanations, concise but complete.',
-  MAHASISWA: 'university students — academic tone, deep theoretical reasoning, cite related concepts, comprehensive explanations.',
+  SD_SMP:    'elementary/middle school — simple vocabulary, daily-life analogies, child-friendly, short sentences.',
+  SMA_SMK:   'high school (UTBK level) — key concepts, exam-focused, concise.',
+  MAHASISWA: 'university — academic tone, precise, cite related concepts.',
 };
 
-// ─── Deep-enforcement system prompt ──────────────────────────────────────────
-const SYSTEM_PROMPT = (tone: string) => `
-You are the Lead Curriculum Expert for BikinPaham.ai.
-Your goal is to transform uploaded educational material into an extremely THOROUGH, DEEP, and EXTENSIVE study suite.
-DO NOT give brief, lazy, or truncated summaries. Be comprehensive.
+// ─── Two separate prompts (each ~half the output) ─────────────────────────────
 
-MATHEMATICAL FORMULA & SYMBOL FORMATTING RULE:
-- ALL mathematical formulas, variables, equations, set symbols, fractions, powers, roots, and inequalities MUST be formatted in LaTeX syntax enclosed in single dollar signs '$...$' for inline or '$$...$$' for block formulas.
-- EXAMPLES:
-  - Write '$\\sqrt{2}$' instead of 'akar(2)'
-  - Write '$\\frac{a}{b}$' instead of 'a/b'
-  - Write '$x \\ge -6$' instead of 'x >= -6'
-  - Write '$\\mathbb{R}$', '$\\in$', '$\\neq 0$' for sets and relations.
-- NEVER write raw plain text math like 'akar(x)', '>=', or 'x^2'. Always wrap in LaTeX dollar signs ($...$).
+const PROMPT_A = (tone: string, content: string) => `
+You are a curriculum expert for BikinPaham.ai.
+Target audience: ${tone}
 
-OUTPUT REQUIREMENTS (STRICT QUANTITY & DEPTH):
+Output a single JSON object (no markdown, no extra text, stop immediately after the closing brace):
+{"document_meta":{"title":"...","target_level":"..."},"summary_module":[{"topic":"...","key_points":["...","...","..."],"explanation":"..."}],"flashcards":[{"id":1,"front":"...","back":"..."}]}
 
-1. summary_module:
-   - Generate 4 to 6 detailed sub-topics covering the ENTIRE document.
-   - Each topic MUST have 3-5 comprehensive key_points.
-   - The 'explanation' field MUST be a detailed multi-sentence explanation (minimum 100 words per topic), using analogies fitting for level: ${tone}.
+Rules:
+- summary_module: exactly 3 topics, each with exactly 3 key_points (max 10 words each), explanation max 1 sentence.
+- flashcards: exactly 5 items, front max 8 words, back max 12 words.
+- Write math in plain text: use "x^2", "sqrt(x)" — NO LaTeX backslashes or dollar signs.
+- DO NOT add any text outside the JSON object.
 
-2. flashcards:
-   - Generate 8 to 10 distinct, high-value flashcards covering definitions, formulas, key concepts, and important facts.
-   - Front: Precise concept or question. Back: Clear, actionable definition or answer.
+Document:
+${content}
+`.trim();
 
-3. quiz_exam:
-   - Generate 5 to 8 high-quality multiple-choice questions (options A, B, C, D).
-   - The 'explanation' field MUST explain WHY the correct answer is right AND why the other options are wrong (minimum 2-3 sentences).
+const PROMPT_B = (tone: string, content: string) => `
+You are a curriculum expert for BikinPaham.ai.
+Target audience: ${tone}
 
-Output schema (strict — no markdown fences, no extra commentary):
-{
-  "document_meta": { "title": string, "target_level": string },
-  "summary_module": [{ "topic": string, "key_points": string[], "explanation": string }],
-  "flashcards":     [{ "id": number, "front": string, "back": string }],
-  "quiz_exam":      [{ "id": number, "question": string, "options": string[], "correct_answer": string, "explanation": string }]
-}
+Output a single JSON object (no markdown, no extra text, stop immediately after the closing brace):
+{"quiz_exam":[{"id":1,"question":"...","options":["A. ...","B. ...","C. ...","D. ..."],"correct_answer":"A. ...","explanation":"..."}]}
+
+Rules:
+- quiz_exam: exactly 5 questions, 4 options each (prefix A. B. C. D.).
+- correct_answer must exactly match one option string.
+- explanation: 1 short sentence.
+- Write math in plain text — NO LaTeX.
+- DO NOT add any text outside the JSON object.
+
+Document:
+${content}
 `.trim();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Truncate extracted text to keep input tokens reasonable (~12k chars max) */
-function truncateText(text: string, maxChars = 12000): string {
+function truncateText(text: string, maxChars = 2000): string {
   return text.length > maxChars
-    ? text.slice(0, maxChars) + '\n[...content truncated for processing...]'
+    ? text.slice(0, maxChars) + '\n[...truncated]'
     : text;
 }
 
-/** Clean, repair, and parse JSON from Gemini response */
-function cleanAndParseJSON(rawResponse: string): BikinPahamPayload {
-  let text = rawResponse.trim();
+function sanitizeForGemini(text: string): string {
+  return text
+    .replace(/\$\$[\s\S]*?\$\$/g, '[formula]')
+    .replace(/\$[^$\n]+\$/g, '[formula]')
+    .replace(/\\begin\{[^}]+\}[\s\S]*?\\end\{[^}]+\}/g, '[formula]')
+    .replace(/\\[a-zA-Z]+\{[^}]*\}/g, '')
+    .replace(/\\[a-zA-Z]+/g, '')
+    .replace(/[ \t]{3,}/g, '  ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
-  // 1. Strip markdown code fences if present
-  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+function safeParseJSON<T>(raw: string): T {
+  // Strip markdown fences
+  let text = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
-  // 2. Direct parse attempt
-  try {
-    return JSON.parse(text);
-  } catch {
-    // continue to repair
-  }
+  // Direct parse
+  try { return JSON.parse(text); } catch { /* fall through */ }
 
-  // 3. Extract outermost JSON object { ... }
-  const firstBrace = text.indexOf('{');
-  if (firstBrace !== -1) {
-    text = text.slice(firstBrace);
-  }
+  // Find outermost { ... }
+  const start = text.indexOf('{');
+  if (start !== -1) text = text.slice(start);
 
-  // 4. Handle truncated response or malformed trailing tokens
-  // If JSON was cut off in the middle of a string or array/object:
-  let repaired = text;
+  // Close unterminated string
+  const quotes = (text.match(/(?<!\\)"/g) ?? []).length;
+  if (quotes % 2 !== 0) text += '"';
 
-  // If last open quote not closed, close it
-  const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
-  if (quoteCount % 2 !== 0) {
-    repaired += '"';
-  }
+  // Remove dangling key or comma at end
+  text = text.replace(/,\s*"[^"]*":\s*$/g, '').replace(/,\s*$/g, '');
 
-  // Remove incomplete trailing key-values like `"correct_answer":` or dangling comma
-  repaired = repaired.replace(/,\s*"[^"]*":\s*$/g, '');
-  repaired = repaired.replace(/,\s*$/g, '');
-
-  // Balance brackets and braces
-  let openBraces = 0;
-  let openBrackets = 0;
-  let inString = false;
-
-  for (let i = 0; i < repaired.length; i++) {
-    const char = repaired[i];
-    const prev = i > 0 ? repaired[i - 1] : '';
-
-    if (char === '"' && prev !== '\\') {
-      inString = !inString;
-      continue;
-    }
-
-    if (!inString) {
-      if (char === '{') openBraces++;
-      else if (char === '}') openBraces = Math.max(0, openBraces - 1);
-      else if (char === '[') openBrackets++;
-      else if (char === ']') openBrackets = Math.max(0, openBrackets - 1);
+  // Balance { } [ ]
+  let inStr = false;
+  let ob = 0, ob2 = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], p = i > 0 ? text[i - 1] : '';
+    if (c === '"' && p !== '\\') { inStr = !inStr; continue; }
+    if (!inStr) {
+      if (c === '{') ob++;
+      else if (c === '}') ob = Math.max(0, ob - 1);
+      else if (c === '[') ob2++;
+      else if (c === ']') ob2 = Math.max(0, ob2 - 1);
     }
   }
+  while (ob2-- > 0) text += ']';
+  while (ob-- > 0)  text += '}';
 
-  // Close open brackets and braces
-  while (openBrackets > 0) {
-    repaired += ']';
-    openBrackets--;
-  }
-  while (openBraces > 0) {
-    repaired += '}';
-    openBraces--;
-  }
-
-  try {
-    return JSON.parse(repaired);
-  } catch {
-    // 5. Aggressive regex-based fallback: slice back to last known complete item
-    // Try rolling back to the last valid closing curly brace or bracket
-    const lastValidClosing = Math.max(repaired.lastIndexOf('},'), repaired.lastIndexOf('}]'));
-    if (lastValidClosing !== -1) {
-      let trimmed = repaired.slice(0, lastValidClosing + 1);
-      if (trimmed.includes('"quiz_exam":') && !trimmed.endsWith(']}')) {
-        trimmed += ']}';
-      } else if (!trimmed.endsWith('}')) {
-        trimmed += '}';
-      }
-      try {
-        return JSON.parse(trimmed);
-      } catch (e) {
-        console.error('Aggressive JSON rollback failed:', e);
-      }
+  try { return JSON.parse(text); } catch {
+    // Last resort: rollback to last complete item boundary
+    const last = Math.max(text.lastIndexOf('},'), text.lastIndexOf('}]'));
+    if (last !== -1) {
+      let t = text.slice(0, last + 1);
+      if (!t.endsWith('}')) t += '}';
+      try { return JSON.parse(t); } catch { /* give up */ }
     }
-
-    throw new Error(`JSON response from AI was truncated or invalid: ${rawResponse.slice(-150)}`);
+    throw new Error(`JSON truncated/invalid. Tail: ${raw.slice(-120)}`);
   }
 }
 
@@ -159,155 +124,139 @@ async function extractPptText(buffer: Buffer): Promise<string> {
   return (ast as unknown as { toText: () => string }).toText() ?? '';
 }
 
-/** Extract plain text from PDF buffer (text-based only; returns '' for scanned) */
+/** Extract plain text from PDF buffer */
 async function extractPdfText(buffer: Buffer): Promise<string> {
   try {
-    // Dynamic import avoids pdf-parse@1.1.1 test file load at build time
     const pdfParse = (await import('pdf-parse')).default;
-    const result = await pdfParse(buffer);
-    return result.text ?? '';
-  } catch {
-    return '';
-  }
+    return (await pdfParse(buffer)).text ?? '';
+  } catch { return ''; }
 }
 
 // ─── Route ────────────────────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
-    const contentType = request.headers.get('content-type') || '';
+    const contentType = request.headers.get('content-type') ?? '';
     let documentText = '';
     let targetLevel: TargetLevel = 'SMA_SMK';
     let isImageData = false;
     let imageBase64 = '';
     let mimeType = '';
     let fileHashInput = '';
-    let docTitle = 'Materi';
 
+    // ── Parse request ─────────────────────────────────────────────────────────
     if (contentType.includes('application/json')) {
       const body = await request.json();
-      documentText = body.textContent || '';
-      targetLevel = body.targetLevel || body.target_level || 'SMA_SMK';
-      docTitle = body.fileName || 'Materi';
+      documentText  = body.textContent ?? '';
+      targetLevel   = body.targetLevel ?? body.target_level ?? 'SMA_SMK';
       fileHashInput = documentText;
-
-      if (!documentText.trim()) {
-        return NextResponse.json({ error: 'Teks dokumen kosong atau gagal diekstrak.' }, { status: 400 });
-      }
+      if (!documentText.trim())
+        return NextResponse.json({ error: 'Teks dokumen kosong.' }, { status: 400 });
     } else {
       const formData = await request.formData();
       const file = formData.get('file') as File | null;
-      targetLevel = ((formData.get('targetLevel') || formData.get('target_level')) as TargetLevel) || 'SMA_SMK';
-
-      if (!file) {
+      targetLevel = ((formData.get('targetLevel') ?? formData.get('target_level')) as TargetLevel) ?? 'SMA_SMK';
+      if (!file)
         return NextResponse.json({ error: 'File is required' }, { status: 400 });
-      }
 
-      docTitle = file.name;
-      const bytes = await file.arrayBuffer();
+      const bytes  = await file.arrayBuffer();
       const buffer = Buffer.from(bytes);
-      const fileName = file.name.toLowerCase();
-      const isPpt = fileName.endsWith('.ppt') || fileName.endsWith('.pptx');
-      const isPdf = fileName.endsWith('.pdf') || file.type === 'application/pdf';
-      const isImage = file.type.startsWith('image/');
+      const name   = file.name.toLowerCase();
 
-      if (isImage) {
-        isImageData = true;
-        imageBase64 = buffer.toString('base64');
-        mimeType = file.type;
+      if (file.type.startsWith('image/')) {
+        isImageData  = true;
+        imageBase64  = buffer.toString('base64');
+        mimeType     = file.type;
         fileHashInput = imageBase64;
-      } else if (isPpt) {
-        documentText = await extractPptText(buffer);
+      } else if (name.endsWith('.ppt') || name.endsWith('.pptx')) {
+        documentText  = await extractPptText(buffer);
         fileHashInput = buffer.toString('binary');
-      } else if (isPdf) {
-        const text = await extractPdfText(buffer);
-        if (text.trim().length > 200) {
-          documentText = text;
+      } else if (name.endsWith('.pdf') || file.type === 'application/pdf') {
+        const t = await extractPdfText(buffer);
+        if (t.trim().length > 200) {
+          documentText = t;
         } else {
-          // Scanned PDF fallback
           isImageData = true;
           imageBase64 = buffer.toString('base64');
-          mimeType = 'application/pdf';
+          mimeType    = 'application/pdf';
         }
         fileHashInput = buffer.toString('binary');
       } else {
-        documentText = buffer.toString('utf-8');
+        documentText  = buffer.toString('utf-8');
         fileHashInput = documentText;
       }
     }
 
-    if (!['SD_SMP', 'SMA_SMK', 'MAHASISWA'].includes(targetLevel)) {
+    if (!['SD_SMP', 'SMA_SMK', 'MAHASISWA'].includes(targetLevel))
       return NextResponse.json({ error: 'Valid target_level required' }, { status: 400 });
-    }
 
-    // ── SHA-256 hash for cache ────────────────────────────────────────────────
+    // ── Cache lookup ──────────────────────────────────────────────────────────
     const hash = createHash('sha256').update(fileHashInput).update(targetLevel).digest('hex');
-
-    // ── Cache lookup ───────────────────────────────────────────────────────────
-    const { data: cached, error: dbError } = await supabase
-      .from('materials')
-      .select('payload')
-      .eq('file_hash', hash)
-      .eq('target_level', targetLevel)
-      .maybeSingle();
-
-    if (dbError) console.warn('Supabase cache lookup error:', dbError.message);
-
-    if (cached?.payload) {
+    const { data: cached, error: dbErr } = await supabase
+      .from('materials').select('payload')
+      .eq('file_hash', hash).eq('target_level', targetLevel).maybeSingle();
+    if (dbErr) console.warn('Supabase lookup error:', dbErr.message);
+    if (cached?.payload)
       return NextResponse.json({ cached: true, payload: cached.payload as BikinPahamPayload });
-    }
 
-    // ── Gemini setup ───────────────────────────────────────────────────────────
+    // ── Gemini setup ──────────────────────────────────────────────────────────
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
     const model = genAI.getGenerativeModel(
-      { model: modelName },
+      { model: process.env.GEMINI_MODEL ?? 'gemini-1.5-flash' },
       { apiVersion: 'v1beta' },
     );
 
-    const generationConfig = {
-      temperature: 0.4,
-      maxOutputTokens: 8192,
-      responseMimeType: 'application/json' as const,
+    const cfg = {
+      temperature:     0.3,
+      maxOutputTokens: 2048,
     };
 
-    const systemPrompt = SYSTEM_PROMPT(TONE[targetLevel]);
-    let result;
+    const tone    = TONE[targetLevel];
+    const content = isImageData ? '' : truncateText(sanitizeForGemini(documentText));
 
-    if (isImageData) {
-      result = await model.generateContent({
-        contents: [{
-          role: 'user',
-          parts: [
-            { text: systemPrompt },
-            { inlineData: { mimeType, data: imageBase64 } },
-          ],
-        }],
-        generationConfig,
-      });
-    } else {
-      if (!documentText.trim()) throw new Error('No text extracted from document');
+    // ── Build requests ────────────────────────────────────────────────────────
+    const makeReq = (prompt: string, imgData?: { base64: string; mime: string }): GenerateContentRequest => ({
+      contents: [{
+        role: 'user',
+        parts: imgData
+          ? [{ text: prompt }, { inlineData: { mimeType: imgData.mime, data: imgData.base64 } }]
+          : [{ text: prompt }],
+      }],
+      generationConfig: cfg,
+    });
 
-      result = await model.generateContent({
-        contents: [{
-          role: 'user',
-          parts: [{ text: `${systemPrompt}\n\nDocument content:\n${truncateText(documentText)}` }],
-        }],
-        generationConfig,
-      });
-    }
+    const img = isImageData ? { base64: imageBase64, mime: mimeType } : undefined;
 
-    const raw = result.response.text();
-    if (!raw) throw new Error('No content from Gemini');
+    // ── Fire both calls IN PARALLEL ───────────────────────────────────────────
+    const [resA, resB] = await Promise.all([
+      model.generateContent(makeReq(PROMPT_A(tone, content), img)),
+      model.generateContent(makeReq(PROMPT_B(tone, content), img)),
+    ]);
 
-    const payload: BikinPahamPayload = cleanAndParseJSON(raw);
+    const rawA = resA.response.text();
+    const rawB = resB.response.text();
+    if (!rawA) throw new Error('No response from Gemini (call A)');
+    if (!rawB) throw new Error('No response from Gemini (call B)');
+
+    // ── Parse & merge ─────────────────────────────────────────────────────────
+    type PartA = { document_meta: BikinPahamPayload['document_meta']; summary_module: SummaryTopic[]; flashcards: FlashcardItem[] };
+    type PartB = { quiz_exam: QuizQuestion[] };
+
+    const partA = safeParseJSON<PartA>(rawA);
+    const partB = safeParseJSON<PartB>(rawB);
+
+    const payload: BikinPahamPayload = {
+      document_meta:  partA.document_meta  ?? { title: 'Materi', target_level: targetLevel },
+      summary_module: partA.summary_module ?? [],
+      flashcards:     partA.flashcards     ?? [],
+      quiz_exam:      partB.quiz_exam      ?? [],
+    };
     payload.document_meta.target_level = targetLevel;
 
-    // ── Persist to cache (non-blocking) ───────────────────────────────────────
-    supabase
-      .from('materials')
+    // ── Cache (non-blocking) ──────────────────────────────────────────────────
+    supabase.from('materials')
       .insert({ file_hash: hash, target_level: targetLevel, title: payload.document_meta.title, payload })
       .then(({ error }) => { if (error) console.warn('Supabase insert error:', error.message); });
 
